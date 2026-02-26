@@ -110,8 +110,21 @@ class Sensor:
         params = {"jql": jql, "fields": "key", "maxResults": 50}
 
         resp = requests.get(url, headers=self._headers(), params=params, timeout=120)
-        resp.raise_for_status()
-        return resp.json().get("issues", [])
+        if not resp.ok:
+            print(
+                f"[Sensor] Jira search failed: HTTP {resp.status_code}\n"
+                f"  URL: {url}\n"
+                f"  Response: {resp.text[:500]}"
+            )
+            resp.raise_for_status()
+        try:
+            data = resp.json()
+        except requests.exceptions.JSONDecodeError:
+            raise RuntimeError(
+                f"Jira returned non-JSON response (HTTP {resp.status_code}). "
+                f"First 500 chars: {resp.text[:500]}"
+            )
+        return data.get("issues", [])
 
     def _has_trigger_comment(self, issue_key: str) -> bool:
         url = f"{self.jira_base_url}/rest/api/2/issue/{issue_key}/comment"

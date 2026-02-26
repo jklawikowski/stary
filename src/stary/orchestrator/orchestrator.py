@@ -7,8 +7,8 @@ import time
 
 import requests
 
-from agents import JiraReaderAgent, ImplementerAgent, ReviewerAgent
-from sensor import Sensor
+from stary.agents import JiraReaderAgent, ImplementerAgent, ReviewerAgent
+from stary.sensor import Sensor
 
 POLL_INTERVAL = int(os.environ.get("SENSOR_POLL_INTERVAL", "60"))
 
@@ -23,6 +23,9 @@ class Orchestrator:
         repo_path: str | None = None,
         jira_base_url: str | None = None,
         jira_token: str | None = None,
+        github_token: str | None = None,
+        git_user_name: str | None = None,
+        git_user_email: str | None = None,
         poll_interval: int | None = None,
     ):
         self.sensor = Sensor(
@@ -36,6 +39,9 @@ class Orchestrator:
         )
         self.agent2 = ImplementerAgent(
             inference_url=agent2_inference_url or inference_url,
+            github_token=github_token,
+            git_user_name=git_user_name,
+            git_user_email=git_user_email,
         )
         self.agent3 = ReviewerAgent(
             inference_url=agent3_inference_url or inference_url,

@@ -62,3 +62,10 @@ dmypy.json
 
 # ruff / linters
 .ruff_cache/
+
+# Dagster
+/dagster_home/
+storage/
+schedules/
+runs/
+logs/

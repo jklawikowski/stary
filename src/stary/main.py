@@ -15,7 +15,7 @@ Usage:
 
 import sys
 import os
-from orchestrator import Orchestrator
+from stary.orchestrator import Orchestrator
 
 
 def main():

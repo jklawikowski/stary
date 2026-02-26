@@ -1,0 +1,9 @@
+# Dagster workspace configuration
+# Defines the code locations (user deployments) available to the dagster webserver.
+# See: https://docs.dagster.io/concepts/code-locations/workspace-files
+
+load_from:
+  - grpc_server:
+      host: user_deployment
+      port: 4000
+      location_name: stary

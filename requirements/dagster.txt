@@ -1,0 +1,6 @@
+# Dagster requirements for the webserver container
+dagster==1.12.3
+dagster-webserver==1.12.3
+dagster-docker==0.28.3
+dagster-k8s==0.28.3
+dagster-postgres==0.28.3

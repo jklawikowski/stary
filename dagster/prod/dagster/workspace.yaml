@@ -1,0 +1,8 @@
+# Dagster workspace configuration (production)
+# Points to the user deployment gRPC server.
+
+load_from:
+  - grpc_server:
+      host: user_deployment
+      port: 4000
+      location_name: stary

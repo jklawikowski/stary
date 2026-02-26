@@ -49,8 +49,14 @@ class ImplementerAgent:
     def __init__(
         self,
         inference_url: str | None = None,
+        github_token: str | None = None,
+        git_user_name: str | None = None,
+        git_user_email: str | None = None,
     ):
         self.inference_url = inference_url or INFERENCE_URL
+        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
+        self.git_user_name = git_user_name or os.environ.get("GIT_USER_NAME", "qaplatformbot")
+        self.git_user_email = git_user_email or os.environ.get("GIT_USER_EMAIL", "sys_qaplatformbot@intel.com")
         self.repo_path: str | None = None  # set after clone
 
     # ------------------------------------------------------------------
@@ -151,8 +157,8 @@ class ImplementerAgent:
     # Create pull request
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _create_pull_request(
+        self,
         repo_url: str,
         branch_name: str,
         ticket_id: str,
@@ -162,14 +168,13 @@ class ImplementerAgent:
         """Create a GitHub pull request from *branch_name* to *base_branch*
         and return the PR URL.
 
-        Uses the GitHub REST API with a ``GITHUB_TOKEN`` environment variable
-        for authentication.
+        Uses the ``github_token`` provided at construction (or falls back to
+        the ``GITHUB_TOKEN`` environment variable) for authentication.
         """
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if not token:
+        if not self.github_token:
             raise EnvironmentError(
-                "[Agent2] GITHUB_TOKEN environment variable is required to "
-                "create a pull request."
+                "[Agent2] github_token is required to create a pull request. "
+                "Pass it to the constructor or set GITHUB_TOKEN env var."
             )
 
         # Extract owner/repo from the URL
@@ -188,7 +193,7 @@ class ImplementerAgent:
 
         api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
         headers = {
-            "Authorization": f"token {token}",
+            "Authorization": f"token {self.github_token}",
             "Accept": "application/vnd.github+json",
         }
         body = {
@@ -258,8 +263,16 @@ class ImplementerAgent:
             shutil.rmtree(dest)
 
         PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Use GITHUB_TOKEN for authentication if available (required for private repos)
+        if self.github_token and "github.com" in repo_url:
+            # Inject token into URL: https://github.com/... -> https://{token}@github.com/...
+            auth_url = repo_url.replace("https://github.com", f"https://{self.github_token}@github.com")
+        else:
+            auth_url = repo_url
+
         subprocess.run(
-            ["git", "clone", repo_url, str(dest)],
+            ["git", "clone", auth_url, str(dest)],
             check=True,
             capture_output=True,
             text=True,
@@ -335,9 +348,19 @@ class ImplementerAgent:
             text=True,
         )
 
+        # Configure git identity (required for commit in containers)
+        run(["git", "config", "user.name", self.git_user_name])
+        run(["git", "config", "user.email", self.git_user_email])
+
         run(["git", "add", "-A"])
         run(["git", "commit", "-m", commit_msg])
-        run(["git", "push", "origin", branch_name])
+
+        # Use authenticated URL for push if token is available
+        if self.github_token and "github.com" in repo_url:
+            auth_url = repo_url.replace("https://github.com", f"https://{self.github_token}@github.com")
+            run(["git", "push", auth_url, branch_name])
+        else:
+            run(["git", "push", "origin", branch_name])
 
         # Build a browsable URL for the branch
         # e.g. https://github.com/org/repo -> https://github.com/org/repo/tree/<branch>
