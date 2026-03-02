@@ -108,6 +108,10 @@ class Orchestrator:
             url = ticket["ticket_url"]
             print(f"\n[Orchestrator] >>> Processing {key}: {url}")
             try:
+                # In the standalone orchestrator path there is no Dagster
+                # run ID available, so the WIP comment will not contain a
+                # Dagster link (dagster_run_url=None).  The Dagster-managed
+                # pipeline (mark_ticket_wip op) handles this automatically.
                 self.sensor.mark_as_wip(key)
                 result = self.run(url)
                 pr_url = result.get("pr_url", "N/A")

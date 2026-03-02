@@ -5,6 +5,7 @@ The sensor has NO knowledge of orchestration, agents, or pipelines.
 """
 
 import os
+from typing import Optional
 
 import requests
 
@@ -62,11 +63,20 @@ class Sensor:
         print(f"[Sensor] {len(triggered)} ticket(s) confirmed.")
         return triggered
 
-    def mark_as_wip(self, ticket_key: str) -> None:
+    def mark_as_wip(
+        self,
+        ticket_key: str,
+        dagster_run_url: Optional[str] = None,
+    ) -> None:
         """Add a WIP marker so the ticket is not picked up again while
-        the agent pipeline is still running."""
+        the agent pipeline is still running.
+
+        If *dagster_run_url* is provided the comment will include a clickable
+        link to the live Dagster pipeline run.
+        """
         url = f"{self.jira_base_url}/rest/api/2/issue/{ticket_key}/comment"
-        body = {"body": f"{self.wip_marker}\nPipeline in progress."}
+        comment_body = self._format_wip_comment(dagster_run_url)
+        body = {"body": comment_body}
         resp = requests.post(url, headers=self._headers(), json=body, timeout=120)
         resp.raise_for_status()
         print(f"[Sensor] Marked {ticket_key} as WIP.")
@@ -86,6 +96,27 @@ class Sensor:
         resp = requests.post(url, headers=self._headers(), json=body, timeout=120)
         resp.raise_for_status()
         print(f"[Sensor] Marked {ticket_key} as done (status={status}, pr={pr_url}).")
+
+    # ------------------------------------------------------------------
+    # WIP comment formatting
+    # ------------------------------------------------------------------
+
+    def _format_wip_comment(
+        self,
+        dagster_run_url: Optional[str] = None,
+    ) -> str:
+        """Build the WIP comment body.
+
+        Uses Jira wiki markup.  When a *dagster_run_url* is available a
+        clickable link is appended.
+        """
+        lines = [
+            self.wip_marker,
+            "Pipeline has been triggered and is currently in progress.",
+        ]
+        if dagster_run_url:
+            lines.append(f"[View live pipeline status|{dagster_run_url}]")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # internals
