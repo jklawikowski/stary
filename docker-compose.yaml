@@ -13,9 +13,10 @@
 # ---------------------------------------------------------------------------
 
 x-proxy-env: &proxy-env
-  HTTP_PROXY: http://proxy-dmz.intel.com:912/
-  HTTPS_PROXY: http://proxy-dmz.intel.com:912/
-  NO_PROXY: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal
+  HTTP_PROXY: ${HTTP_PROXY:-http://proxy-dmz.intel.com:912/}
+  HTTPS_PROXY: ${HTTPS_PROXY:-http://proxy-dmz.intel.com:912/}
+  NO_PROXY: ${NO_PROXY:-0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal}
+  no_proxy: ${no_proxy:-0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal}
 
 x-dagster-db-env: &dagster-db-env
   DAGSTER_PG_USERNAME: dagster
@@ -56,6 +57,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   # Dagster webserver (dagit UI)
   dagster:
@@ -86,8 +88,11 @@ services:
     environment:
       <<: [*proxy-env, *dagster-db-env, *stary-config-env]
       DAGSTER_CURRENT_IMAGE: stary-user-deployment
+      # Ensure healthcheck and internal gRPC calls to localhost bypass proxy
+      NO_PROXY: ${NO_PROXY:-0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal}
+      no_proxy: ${no_proxy:-0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal}
     healthcheck:
-      test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "0.0.0.0", "-p", "4000"]
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
       interval: 10s
       timeout: 10s
       retries: 5
