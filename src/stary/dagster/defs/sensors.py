@@ -18,6 +18,7 @@ from dagster import (
     sensor,
 )
 
+from stary.config import build_dagster_run_url, get_dagster_base_url
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
 
 logger = logging.getLogger(__name__)
@@ -126,13 +127,17 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
     Logs failure details. Can be extended to send notifications
     (e.g. MS Teams, Slack, email).
     """
-    dagit_url = os.getenv("DAGIT_UI_URL", "http://localhost:3000")
+    dagster_base_url = get_dagster_base_url()
     run_id = context.pipeline_run.run_id
-    run_url = f"{dagit_url}/runs/{run_id}"
+    dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
+    # Fallback to legacy DAGIT_UI_URL if DAGSTER_BASE_URL is not set
+    if not dagster_run_url:
+        dagit_url = os.getenv("DAGIT_UI_URL", "http://localhost:3000")
+        dagster_run_url = f"{dagit_url}/runs/{run_id}"
     pipeline_name = context.pipeline_run.pipeline_name
 
     logger.error(
         "Dagster job failed: %s | Run URL: %s",
         pipeline_name,
-        run_url,
+        dagster_run_url,
     )

@@ -32,6 +32,7 @@ x-stary-config-env: &stary-config-env
   JIRA_TOKEN: ${JIRA_TOKEN:-}
   GITHUB_TOKEN: ${GITHUB_TOKEN:-}
   REPO_PATH: ${REPO_PATH:-}
+  DAGSTER_BASE_URL: ${DAGSTER_BASE_URL:-http://localhost:3000}
 
 # ---------------------------------------------------------------------------
 # Services

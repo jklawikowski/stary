@@ -16,6 +16,8 @@ from typing import Any, Dict
 
 from dagster import In, Nothing, OpExecutionContext, Out, op
 
+from stary.config import build_dagster_run_url, get_dagster_base_url
+
 
 # ---------------------------------------------------------------------------
 # Agent 1: Read Jira Ticket
@@ -122,13 +124,27 @@ def review_code(context: OpExecutionContext, pr_url: str) -> Dict[str, Any]:
     out=Out(Nothing),
 )
 def mark_ticket_wip(context: OpExecutionContext) -> None:
-    """Add a WIP marker comment on the Jira ticket."""
+    """Add a WIP marker comment on the Jira ticket.
+
+    If ``DAGSTER_BASE_URL`` is configured the WIP comment will include a
+    clickable link to the current Dagster run.
+    """
     from stary.sensor import Sensor
 
     cfg = context.op_config
     s = Sensor(jira_base_url=cfg["jira_base_url"], jira_token=cfg["jira_token"])
-    s.mark_as_wip(cfg["ticket_key"])
-    context.log.info("Marked %s as WIP", cfg["ticket_key"])
+
+    # Build Dagster run URL when possible
+    dagster_base_url = get_dagster_base_url()
+    run_id = context.run_id
+    dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
+
+    s.mark_as_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
+    context.log.info(
+        "Marked %s as WIP (dagster_run_url=%s)",
+        cfg["ticket_key"],
+        dagster_run_url or "N/A",
+    )
 
 
 @op(
