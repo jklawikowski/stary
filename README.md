@@ -93,6 +93,63 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Smoke Test (Docker Compose)
+
+A convenience script is provided to verify that all Docker Compose services
+start correctly and reach a healthy state:
+
+```bash
+./scripts/test-compose.sh
+```
+
+This will build and start all services, wait for them to become healthy
+(up to 120 seconds), then tear everything down.  It is useful for local
+verification and CI pipelines.
+
+## Proxy Configuration for Docker Environments
+
+If you are behind a corporate HTTP proxy (common in enterprise environments),
+Docker containers may inherit `HTTP_PROXY` / `HTTPS_PROXY` from the host
+environment or from Docker daemon settings (`~/.docker/config.json`).  This
+can cause **container healthchecks to fail** because requests to `localhost`
+get routed through the proxy instead of connecting directly.
+
+### Symptoms
+
+- `docker compose up` fails with:
+  ```
+  dependency failed to start: container stary-user-deployment is unhealthy
+  ```
+- The Dagster gRPC code server inside the container starts fine (logs show
+  it listening on port 4000), but the healthcheck never passes.
+
+### Solution
+
+The `docker-compose.yaml` already sets `NO_PROXY` to include `localhost`
+and `127.0.0.1` for all services.  The healthcheck uses Dagster's built-in
+`dagster api grpc-health-check` command which does not go through HTTP
+proxy settings.
+
+If you still experience issues:
+
+1. **Check Docker daemon proxy config:**
+   ```bash
+   cat ~/.docker/config.json
+   # Look for "proxies" section
+   ```
+   Ensure `noProxy` includes `localhost,127.0.0.1`.
+
+2. **Override proxy variables in `.env`:**
+   ```bash
+   NO_PROXY=0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal
+   ```
+
+3. **Unset proxy variables** if you don't need them:
+   ```bash
+   unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+   docker compose up
+   ```
+
 ## License
 
 MIT

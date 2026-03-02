@@ -39,4 +39,5 @@ EXPOSE 4000
 
 CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4000", "-m", "stary.dagster.definitions"]
 
-HEALTHCHECK CMD ["dagster", "api", "grpc-health-check", "-h", "0.0.0.0", "-p", "4000"]
+HEALTHCHECK --interval=10s --timeout=10s --retries=5 --start-period=30s \
+    CMD ["dagster", "api", "grpc-health-check", "-p", "4000"]
