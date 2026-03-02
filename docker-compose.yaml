@@ -8,6 +8,35 @@
 # Access:
 #   Dagster Web UI: http://localhost:3000
 
+# ---------------------------------------------------------------------------
+# Shared environment blocks (YAML anchors)
+# ---------------------------------------------------------------------------
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: http://proxy-dmz.intel.com:912/
+  HTTPS_PROXY: http://proxy-dmz.intel.com:912/
+  NO_PROXY: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user-deployment,host.docker.internal
+
+x-dagster-db-env: &dagster-db-env
+  DAGSTER_PG_USERNAME: dagster
+  DAGSTER_PG_PASSWORD: dagster
+  DAGSTER_PG_HOST: dagster-db
+  DAGSTER_PG_DB: dagster
+
+x-stary-config-env: &stary-config-env
+  INFERENCE_URL: ${INFERENCE_URL:-http://host.docker.internal:3030/v1/chat/completions}
+  AGENT1_INFERENCE_URL: ${AGENT1_INFERENCE_URL:-}
+  AGENT2_INFERENCE_URL: ${AGENT2_INFERENCE_URL:-}
+  AGENT3_INFERENCE_URL: ${AGENT3_INFERENCE_URL:-}
+  JIRA_BASE_URL: ${JIRA_BASE_URL:-}
+  JIRA_TOKEN: ${JIRA_TOKEN:-}
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  REPO_PATH: ${REPO_PATH:-}
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
 services:
   # PostgreSQL database for Dagster metadata
   dagster-db:
@@ -36,25 +65,15 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Corporate proxy
-      HTTP_PROXY: http://proxy-dmz.intel.com:912/
-      http_proxy: http://proxy-dmz.intel.com:912/
-      HTTPS_PROXY: http://proxy-dmz.intel.com:912/
-      https_proxy: http://proxy-dmz.intel.com:912/
-      NO_PROXY: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user_deployment
-      no_proxy: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user_deployment
-      DAGSTER_PG_USERNAME: dagster
-      DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_HOST: dagster-db
-      DAGSTER_PG_DB: dagster
+      <<: [*proxy-env, *dagster-db-env]
     depends_on:
       dagster-db:
         condition: service_healthy
-      user_deployment:
+      user-deployment:
         condition: service_healthy
 
   # User deployment (stary code location served via gRPC)
-  user_deployment:
+  user-deployment:
     build:
       context: .
       dockerfile: dagster/dev/user_deployment/Dockerfile
@@ -64,29 +83,8 @@ services:
     ports:
       - "4000:4000"
     environment:
-      # Corporate proxy
-      HTTP_PROXY: http://proxy-dmz.intel.com:912/
-      http_proxy: http://proxy-dmz.intel.com:912/
-      HTTPS_PROXY: http://proxy-dmz.intel.com:912/
-      https_proxy: http://proxy-dmz.intel.com:912/
-      NO_PROXY: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user_deployment,host.docker.internal
-      no_proxy: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user_deployment,host.docker.internal
-      # Dagster instance (needed for run execution)
-      DAGSTER_PG_USERNAME: dagster
-      DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_HOST: dagster-db
-      DAGSTER_PG_DB: dagster
-      # Dagster
+      <<: [*proxy-env, *dagster-db-env, *stary-config-env]
       DAGSTER_CURRENT_IMAGE: stary-user-deployment
-      # Stary config
-      INFERENCE_URL: ${INFERENCE_URL:-http://host.docker.internal:3030/v1/chat/completions}
-      AGENT1_INFERENCE_URL: ${AGENT1_INFERENCE_URL:-}
-      AGENT2_INFERENCE_URL: ${AGENT2_INFERENCE_URL:-}
-      AGENT3_INFERENCE_URL: ${AGENT3_INFERENCE_URL:-}
-      JIRA_BASE_URL: ${JIRA_BASE_URL:-}
-      JIRA_TOKEN: ${JIRA_TOKEN:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      REPO_PATH: ${REPO_PATH:-}
     healthcheck:
       test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "0.0.0.0", "-p", "4000"]
       interval: 10s
@@ -103,21 +101,11 @@ services:
     entrypoint: ["dagster-daemon", "run"]
     restart: on-failure
     environment:
-      # Corporate proxy
-      HTTP_PROXY: http://proxy-dmz.intel.com:912/
-      http_proxy: http://proxy-dmz.intel.com:912/
-      HTTPS_PROXY: http://proxy-dmz.intel.com:912/
-      https_proxy: http://proxy-dmz.intel.com:912/
-      NO_PROXY: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user_deployment
-      no_proxy: 0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,dagster-db,dagster,user_deployment
-      DAGSTER_PG_USERNAME: dagster
-      DAGSTER_PG_PASSWORD: dagster
-      DAGSTER_PG_HOST: dagster-db
-      DAGSTER_PG_DB: dagster
+      <<: [*proxy-env, *dagster-db-env]
     depends_on:
       dagster-db:
         condition: service_healthy
-      user_deployment:
+      user-deployment:
         condition: service_healthy
 
 volumes:
