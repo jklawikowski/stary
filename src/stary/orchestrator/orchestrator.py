@@ -53,12 +53,14 @@ class Orchestrator:
     # Run a single ticket through agent1 → agent2 → agent3
     # ------------------------------------------------------------------
 
-    def run(self, ticket_input: str) -> dict:
+    def run(self, ticket_input: str, auto_merge: bool = True) -> dict:
         """Run the full agent pipeline for one ticket.
 
         Args:
             ticket_input: A Jira ticket URL or a legacy XML file path.
                 Passed straight to Agent 1.
+            auto_merge: If True, merge PR automatically when code review passes.
+                If False, leave PR open even when approved.
         """
 
         # Step 1 – interpret Jira ticket
@@ -78,9 +80,9 @@ class Orchestrator:
 
         # Step 3 – code review
         print("\n" + "=" * 60)
-        print("STEP 3: Code review")
+        print(f"STEP 3: Code review (auto_merge={auto_merge})")
         print("=" * 60)
-        review = self.agent3.run(pr_url)
+        review = self.agent3.run(pr_url, auto_merge=auto_merge)
         print(f"[Orchestrator] Agent 3 verdict: {'APPROVED' if review.get('approved') else 'CHANGES REQUESTED'}")
 
         return {
@@ -107,14 +109,15 @@ class Orchestrator:
         for ticket in triggered:
             key = ticket["ticket_key"]
             url = ticket["ticket_url"]
-            print(f"\n[Orchestrator] >>> Processing {key}: {url}")
+            auto_merge = ticket.get("auto_merge", True)
+            print(f"\n[Orchestrator] >>> Processing {key}: {url} (auto_merge={auto_merge})")
             try:
                 # In the standalone orchestrator path there is no Dagster
                 # run ID available, so the WIP comment will not contain a
                 # Dagster link (dagster_run_url=None).  The Dagster-managed
                 # pipeline (mark_ticket_wip op) handles this automatically.
                 self.sensor.mark_as_wip(key)
-                result = self.run(url)
+                result = self.run(url, auto_merge=auto_merge)
                 pr_url = result.get("pr_url", "N/A")
                 review = result.get("review", {})
                 verdict = "APPROVED" if review.get("approved") else "CHANGES_REQUESTED"

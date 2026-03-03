@@ -78,7 +78,7 @@ class ReviewerAgent:
     # public API
     # ------------------------------------------------------------------
 
-    def run(self, pr_url: str) -> dict:
+    def run(self, pr_url: str, auto_merge: bool = True) -> dict:
         """
         End-to-end review pipeline.
 
@@ -87,6 +87,9 @@ class ReviewerAgent:
         pr_url : str
             Full GitHub pull request URL, e.g.
             ``https://github.com/owner/repo/pull/123``
+        auto_merge : bool, default True
+            If True and the review is approved, the PR will be merged.
+            If False, the PR is left open even when approved.
 
         Returns
         -------
@@ -154,9 +157,11 @@ class ReviewerAgent:
 
         # 8. Rebase & merge if approved ------------------------------------
         review["merged"] = False
-        if review["approved"]:
+        if review["approved"] and auto_merge:
             merged = self._merge_pr(owner, repo, pr_number)
             review["merged"] = merged
+        elif review["approved"] and not auto_merge:
+            print("[Agent3] PR approved but auto_merge=False, skipping merge.")
 
         print(f"[Agent3] Review complete: {status}")
         return review

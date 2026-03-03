@@ -15,6 +15,7 @@ import requests
 JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com")
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
 TRIGGER_COMMENT = "[~jklawiko] do it"
+TRIGGER_PR_ONLY = "[~jklawiko] pull request"
 WIP_MARKER = "[~jklawiko] stary:wip"
 PROCESSED_MARKER = "[~jklawiko] stary:done"
 
@@ -27,11 +28,13 @@ class Sensor:
         jira_base_url: str | None = None,
         jira_token: str | None = None,
         trigger_comment: str | None = None,
+        trigger_pr_only: str | None = None,
         processed_marker: str | None = None,
     ):
         self.jira_base_url = jira_base_url or JIRA_BASE_URL
         self.jira_token = jira_token or JIRA_TOKEN
         self.trigger_comment = trigger_comment or TRIGGER_COMMENT
+        self.trigger_pr_only = trigger_pr_only or TRIGGER_PR_ONLY
         self.wip_marker = WIP_MARKER
         self.processed_marker = processed_marker or PROCESSED_MARKER
 
@@ -45,6 +48,7 @@ class Sensor:
         Returns a list of dicts, each containing:
             ``ticket_key``  – e.g. "PROJ-123"
             ``ticket_url``  – e.g. "https://jira.devtools.intel.com/browse/PROJ-123"
+            ``auto_merge``  – True if triggered by "do it", False if "pull request"
         """
         print("[Sensor] Querying Jira for tickets with trigger comment …")
         issues = self._search_triggered_tickets()
@@ -53,12 +57,18 @@ class Sensor:
         triggered: list[dict] = []
         for issue in issues:
             key = issue["key"]
-            if not self._has_trigger_comment(key):
+            trigger_type = self._get_trigger_type(key)
+            if trigger_type is None:
                 print(f"[Sensor] {key}: trigger comment not confirmed, skipping.")
                 continue
             ticket_url = f"{self.jira_base_url}/browse/{key}"
-            print(f"[Sensor] Triggered: {key} → {ticket_url}")
-            triggered.append({"ticket_key": key, "ticket_url": ticket_url})
+            auto_merge = trigger_type == "do_it"
+            print(f"[Sensor] Triggered: {key} → {ticket_url} (auto_merge={auto_merge})")
+            triggered.append({
+                "ticket_key": key,
+                "ticket_url": ticket_url,
+                "auto_merge": auto_merge,
+            })
 
         print(f"[Sensor] {len(triggered)} ticket(s) confirmed.")
         return triggered
@@ -131,9 +141,11 @@ class Sensor:
         }
 
     def _search_triggered_tickets(self) -> list[dict]:
+        # Search for either trigger comment ("do it" OR "pull request")
         jql = (
             'status != Closed AND status != Done AND status != Resolved '
-            f'AND comment ~ "\\"{self.trigger_comment}\\"" '
+            f'AND (comment ~ "\\"{self.trigger_comment}\\"" '
+            f'OR comment ~ "\\"{self.trigger_pr_only}\\"") '
             f'AND NOT comment ~ "\\"{self.wip_marker}\\"" '
             f'AND NOT comment ~ "\\"{self.processed_marker}\\"" '
         )
@@ -158,8 +170,29 @@ class Sensor:
         return data.get("issues", [])
 
     def _has_trigger_comment(self, issue_key: str) -> bool:
+        """Check if issue has any trigger comment (legacy helper)."""
+        return self._get_trigger_type(issue_key) is not None
+
+    def _get_trigger_type(self, issue_key: str) -> str | None:
+        """Determine which trigger comment is present.
+
+        Returns:
+            "do_it" if the full-flow trigger is found,
+            "pr_only" if the PR-only trigger is found,
+            None if no trigger is found.
+
+        If both triggers are present, "do_it" takes precedence.
+        """
         url = f"{self.jira_base_url}/rest/api/2/issue/{issue_key}/comment"
         resp = requests.get(url, headers=self._headers(), timeout=120)
         resp.raise_for_status()
         comments = resp.json().get("comments", [])
-        return any(self.trigger_comment in c.get("body", "") for c in comments)
+
+        has_do_it = any(self.trigger_comment in c.get("body", "") for c in comments)
+        has_pr_only = any(self.trigger_pr_only in c.get("body", "") for c in comments)
+
+        if has_do_it:
+            return "do_it"
+        if has_pr_only:
+            return "pr_only"
+        return None

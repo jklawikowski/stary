@@ -14,7 +14,7 @@ Ops:
 import os
 from typing import Any, Dict
 
-from dagster import In, Nothing, OpExecutionContext, Out, op
+from dagster import Field, In, Nothing, OpExecutionContext, Out, op
 
 from stary.config import build_dagster_run_url, get_dagster_base_url
 
@@ -92,6 +92,7 @@ def implement_feature(context: OpExecutionContext, task_input: Dict) -> str:
     description="Review the PR using Agent 3 (ReviewerAgent) – LLM-powered code review.",
     config_schema={
         "inference_url": str,
+        "auto_merge": Field(bool, default_value=True, is_required=False),
     },
     ins={"pr_url": In(str)},
     out=Out(Dict),
@@ -102,9 +103,10 @@ def review_code(context: OpExecutionContext, pr_url: str) -> Dict[str, Any]:
 
     cfg = context.op_config
     agent = ReviewerAgent(inference_url=cfg["inference_url"])
+    auto_merge = cfg.get("auto_merge", True)
 
-    context.log.info("Agent 3: reviewing PR %s", pr_url)
-    review = agent.run(pr_url)
+    context.log.info("Agent 3: reviewing PR %s (auto_merge=%s)", pr_url, auto_merge)
+    review = agent.run(pr_url, auto_merge=auto_merge)
     verdict = "APPROVED" if review.get("approved") else "CHANGES REQUESTED"
     context.log.info("Agent 3: verdict = %s", verdict)
     return review

@@ -70,6 +70,7 @@ def jira_ticket_sensor() -> Generator:
     for ticket in triggered:
         ticket_key = ticket["ticket_key"]
         ticket_url = ticket["ticket_url"]
+        auto_merge = ticket.get("auto_merge", True)
 
         run_config = {
             "ops": {
@@ -96,6 +97,7 @@ def jira_ticket_sensor() -> Generator:
                 "review_code": {
                     "config": {
                         "inference_url": _get_inference_url("AGENT3_INFERENCE_URL"),
+                        "auto_merge": auto_merge,
                     }
                 },
                 "mark_ticket_done": {
