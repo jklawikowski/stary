@@ -20,6 +20,8 @@ from dagster import (
 
 from stary.config import build_dagster_run_url, get_dagster_base_url
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
+from stary.jira_adapter import JiraAdapter
+from stary.sensor import TriggerConfig, TriggerDetector
 
 logger = logging.getLogger(__name__)
 
@@ -55,22 +57,22 @@ def _get_inference_url(agent_var: str) -> str:
 def jira_ticket_sensor() -> Generator:
     """Dagster sensor that replaces Orchestrator.run_forever().
 
-    Uses the Sensor class to query Jira for triggered tickets and
-    yields a RunRequest for each one, passing all necessary configuration
-    to the ops via run_config.
+    Uses the TriggerDetector and JiraAdapter to query Jira for triggered
+    tickets and yields a RunRequest for each one, passing all necessary
+    configuration to the ops via run_config.
     """
-    from stary.sensor import Sensor
-
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
 
-    s = Sensor(jira_base_url=jira_base_url, jira_token=jira_token)
-    triggered = s.poll()
+    # Create Jira adapter and trigger detector
+    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+    detector = TriggerDetector(jira)
+    triggered = detector.poll()
 
     for ticket in triggered:
-        ticket_key = ticket["ticket_key"]
-        ticket_url = ticket["ticket_url"]
-        auto_merge = ticket.get("auto_merge", True)
+        ticket_key = ticket.key
+        ticket_url = ticket.url
+        auto_merge = ticket.auto_merge
 
         run_config = {
             "ops": {

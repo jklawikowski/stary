@@ -8,7 +8,9 @@ import time
 import requests
 
 from stary.agents import JiraReaderAgent, ImplementerAgent, ReviewerAgent
-from stary.sensor import Sensor
+from stary.jira_adapter import JiraAdapter
+from stary.sensor import TriggerConfig, TriggerDetector
+from stary.ticket_status import StatusMarkerConfig, TicketStatusMarker
 
 POLL_INTERVAL = int(os.environ.get("SENSOR_POLL_INTERVAL", "60"))
 
@@ -28,14 +30,20 @@ class Orchestrator:
         git_user_email: str | None = None,
         poll_interval: int | None = None,
     ):
-        self.sensor = Sensor(
-            jira_base_url=jira_base_url,
-            jira_token=jira_token,
+        # Create shared JiraAdapter
+        self._jira = JiraAdapter(
+            base_url=jira_base_url,
+            token=jira_token,
         )
+
+        # Create trigger detector and status marker
+        self._trigger_detector = TriggerDetector(self._jira)
+        self._status_marker = TicketStatusMarker(self._jira)
+
+        # Create agents
         self.agent1 = JiraReaderAgent(
             inference_url=agent1_inference_url or inference_url,
-            jira_base_url=jira_base_url,
-            jira_token=jira_token,
+            jira_adapter=self._jira,
         )
         self.agent2 = ImplementerAgent(
             inference_url=agent2_inference_url or inference_url,
@@ -97,7 +105,7 @@ class Orchestrator:
 
     def poll_once(self) -> list[str]:
         """Run one sensor poll cycle.  Returns list of processed ticket keys."""
-        triggered = self.sensor.poll()
+        triggered = self._trigger_detector.poll()
 
         if not triggered:
             print("[Orchestrator] No triggered tickets — nothing to do.")
@@ -107,26 +115,28 @@ class Orchestrator:
         processed: list[str] = []
 
         for ticket in triggered:
-            key = ticket["ticket_key"]
-            url = ticket["ticket_url"]
-            auto_merge = ticket.get("auto_merge", True)
+            key = ticket.key
+            url = ticket.url
+            auto_merge = ticket.auto_merge
             print(f"\n[Orchestrator] >>> Processing {key}: {url} (auto_merge={auto_merge})")
             try:
                 # In the standalone orchestrator path there is no Dagster
                 # run ID available, so the WIP comment will not contain a
                 # Dagster link (dagster_run_url=None).  The Dagster-managed
                 # pipeline (mark_ticket_wip op) handles this automatically.
-                self.sensor.mark_as_wip(key)
+                self._status_marker.mark_wip(key)
                 result = self.run(url, auto_merge=auto_merge)
                 pr_url = result.get("pr_url", "N/A")
                 review = result.get("review", {})
                 verdict = "APPROVED" if review.get("approved") else "CHANGES_REQUESTED"
                 print(f"[Orchestrator] <<< {key} pipeline finished.")
-                self.sensor.mark_as_done(key, pr_url=pr_url, status=verdict)
+                self._status_marker.mark_done(key, pr_url=pr_url, status=verdict)
                 processed.append(key)
             except Exception as exc:
                 print(f"[Orchestrator] <<< {key} pipeline FAILED: {exc}")
-                self.sensor.mark_as_done(key, pr_url="N/A", status=f"FAILED: {exc}")
+                self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}")
+
+        return processed
 
         return processed
 

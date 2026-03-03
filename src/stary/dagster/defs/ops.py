@@ -131,17 +131,19 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
     If ``DAGSTER_BASE_URL`` is configured the WIP comment will include a
     clickable link to the current Dagster run.
     """
-    from stary.sensor import Sensor
+    from stary.jira_adapter import JiraAdapter
+    from stary.ticket_status import TicketStatusMarker
 
     cfg = context.op_config
-    s = Sensor(jira_base_url=cfg["jira_base_url"], jira_token=cfg["jira_token"])
+    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=cfg["jira_token"])
+    status_marker = TicketStatusMarker(jira)
 
     # Build Dagster run URL when possible
     dagster_base_url = get_dagster_base_url()
     run_id = context.run_id
     dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
 
-    s.mark_as_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
+    status_marker.mark_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
     context.log.info(
         "Marked %s as WIP (dagster_run_url=%s)",
         cfg["ticket_key"],
@@ -162,11 +164,13 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
 )
 def mark_ticket_done(context: OpExecutionContext, pr_url: str, review_result: Dict) -> None:
     """Add a done-marker comment on the Jira ticket."""
-    from stary.sensor import Sensor
+    from stary.jira_adapter import JiraAdapter
+    from stary.ticket_status import TicketStatusMarker
 
     cfg = context.op_config
-    s = Sensor(jira_base_url=cfg["jira_base_url"], jira_token=cfg["jira_token"])
-    s.mark_as_done(cfg["ticket_key"], pr_url=pr_url, status=cfg["status"])
+    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=cfg["jira_token"])
+    status_marker = TicketStatusMarker(jira)
+    status_marker.mark_done(cfg["ticket_key"], pr_url=pr_url, status=cfg["status"])
     context.log.info(
         "Marked %s as done (status=%s, pr=%s)",
         cfg["ticket_key"],

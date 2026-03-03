@@ -6,6 +6,8 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 from stary.config import build_dagster_run_url, get_dagster_base_url
+from stary.jira_adapter import JiraAdapter
+from stary.ticket_status import TicketStatusMarker
 
 
 class TestDagsterRunUrlFlow:
@@ -25,41 +27,43 @@ class TestDagsterRunUrlFlow:
             url = build_dagster_run_url(base, "run-xyz-789")
             assert url is None
 
-    @patch("stary.sensor.requests.post")
-    def test_wip_comment_includes_url_when_configured(self, mock_post: MagicMock):
+    @patch("stary.jira_adapter.requests.Session.request")
+    def test_wip_comment_includes_url_when_configured(self, mock_request: MagicMock):
         """Simulate the mark_ticket_wip op logic."""
-        mock_post.return_value = MagicMock(status_code=201)
-        mock_post.return_value.raise_for_status = MagicMock()
-
-        from stary.sensor import Sensor
+        mock_response = MagicMock(status_code=201, ok=True)
+        mock_response.json.return_value = {"id": "123", "body": "test"}
+        mock_response.raise_for_status = MagicMock()
+        mock_request.return_value = mock_response
 
         with mock.patch.dict(os.environ, {"DAGSTER_BASE_URL": "https://dagster.corp.com"}):
             dagster_base_url = get_dagster_base_url()
             run_id = "abc-def-123"
             dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
 
-            s = Sensor(jira_base_url="https://jira.example.com", jira_token="tok")
-            s.mark_as_wip("TEST-1", dagster_run_url=dagster_run_url)
+            jira = JiraAdapter(base_url="https://jira.example.com", token="tok")
+            marker = TicketStatusMarker(jira)
+            marker.mark_wip("TEST-1", dagster_run_url=dagster_run_url)
 
-        call_kwargs = mock_post.call_args
+        call_kwargs = mock_request.call_args
         body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
         assert "https://dagster.corp.com/runs/abc-def-123" in body["body"]
 
-    @patch("stary.sensor.requests.post")
-    def test_wip_comment_omits_url_when_not_configured(self, mock_post: MagicMock):
-        mock_post.return_value = MagicMock(status_code=201)
-        mock_post.return_value.raise_for_status = MagicMock()
-
-        from stary.sensor import Sensor
+    @patch("stary.jira_adapter.requests.Session.request")
+    def test_wip_comment_omits_url_when_not_configured(self, mock_request: MagicMock):
+        mock_response = MagicMock(status_code=201, ok=True)
+        mock_response.json.return_value = {"id": "123", "body": "test"}
+        mock_response.raise_for_status = MagicMock()
+        mock_request.return_value = mock_response
 
         with mock.patch.dict(os.environ, {}, clear=True):
             dagster_base_url = get_dagster_base_url()
             dagster_run_url = build_dagster_run_url(dagster_base_url, "some-run")
             assert dagster_run_url is None
 
-            s = Sensor(jira_base_url="https://jira.example.com", jira_token="tok")
-            s.mark_as_wip("TEST-2", dagster_run_url=dagster_run_url)
+            jira = JiraAdapter(base_url="https://jira.example.com", token="tok")
+            marker = TicketStatusMarker(jira)
+            marker.mark_wip("TEST-2", dagster_run_url=dagster_run_url)
 
-        call_kwargs = mock_post.call_args
+        call_kwargs = mock_request.call_args
         body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
         assert "View live pipeline status" not in body["body"]

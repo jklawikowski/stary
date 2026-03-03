@@ -9,6 +9,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from stary.jira_adapter import JiraAdapter
+
 INFERENCE_URL = os.environ.get(
     "AGENT1_INFERENCE_URL",
     os.environ.get("INFERENCE_URL", "http://localhost:8080/v1/chat/completions"),
@@ -64,10 +66,17 @@ class JiraReaderAgent:
         inference_url: str | None = None,
         jira_base_url: str | None = None,
         jira_token: str | None = None,
+        jira_adapter: JiraAdapter | None = None,
     ):
         self.inference_url = inference_url or INFERENCE_URL
         self.jira_base_url = jira_base_url or JIRA_BASE_URL
         self.jira_token = jira_token or JIRA_TOKEN
+
+        # Use provided adapter or create one
+        self._jira = jira_adapter or JiraAdapter(
+            base_url=self.jira_base_url,
+            token=self.jira_token,
+        )
 
     # ------------------------------------------------------------------
     # public API
@@ -124,39 +133,21 @@ class JiraReaderAgent:
     # Jira REST API
     # ------------------------------------------------------------------
 
-    def _jira_headers(self) -> dict:
-        if not self.jira_token:
-            raise RuntimeError("JIRA_TOKEN environment variable is not set")
-        return {
-            "Authorization": f"Bearer {self.jira_token}",
-            "Content-Type": "application/json",
-        }
-
     def _fetch_from_jira(self, ticket_url: str) -> tuple[str, str, str]:
         """Fetch ticket data from Jira REST API given a browse URL.
 
-        Extracts the issue key from the URL and calls
-        ``/rest/api/2/issue/{key}`` to retrieve summary and description.
+        Extracts the issue key from the URL and calls the Jira API
+        to retrieve summary and description.
 
         Returns (ticket_id, summary, description).
         """
         # URL form: https://jira.devtools.intel.com/browse/PROJ-123
-        issue_key = ticket_url.rstrip("/").rsplit("/", 1)[-1]
-        api_url = f"{self.jira_base_url}/rest/api/2/issue/{issue_key}"
-        params = {"fields": "summary,description"}
+        issue_key = JiraAdapter.extract_issue_key(ticket_url)
 
         print(f"[Agent1] Fetching ticket {issue_key} from Jira …")
-        resp = requests.get(
-            api_url, headers=self._jira_headers(), params=params, timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        issue = self._jira.get_issue(issue_key, fields=["summary", "description"])
 
-        ticket_id = data.get("key", issue_key)
-        fields = data.get("fields", {})
-        summary = fields.get("summary", "")
-        description = fields.get("description", "")
-        return ticket_id, summary, description
+        return issue.key, issue.summary, issue.description
 
     # ------------------------------------------------------------------
     # Legacy XML parsing
