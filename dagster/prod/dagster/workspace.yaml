@@ -3,6 +3,6 @@
 
 load_from:
   - grpc_server:
-      host: user_deployment
+      host: user-deployment
       port: 4000
       location_name: stary
