@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Stary – Software Task Agentic Resolution sYstem"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
 
 dependencies = [
     "dagster>=1.9.0",
