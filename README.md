@@ -149,7 +149,3 @@ If you still experience issues:
    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
    docker compose up
    ```
-
-## License
-
-MIT
