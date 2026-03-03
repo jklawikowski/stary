@@ -45,6 +45,7 @@ class Orchestrator:
         )
         self.agent3 = ReviewerAgent(
             inference_url=agent3_inference_url or inference_url,
+            github_token=github_token,
         )
         self.poll_interval = poll_interval or POLL_INTERVAL
 

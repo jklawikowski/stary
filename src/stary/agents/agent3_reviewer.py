@@ -18,7 +18,6 @@ INFERENCE_URL = os.environ.get(
     "AGENT3_INFERENCE_URL",
     os.environ.get("INFERENCE_URL", "http://localhost:8080/v1/chat/completions"),
 )
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 # File extensions considered relevant source code for context
 _SOURCE_EXTENSIONS = (
@@ -65,7 +64,7 @@ class ReviewerAgent:
         github_token: str | None = None,
     ):
         self.inference_url = inference_url or INFERENCE_URL
-        self.github_token = github_token or GITHUB_TOKEN
+        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
         if not self.github_token:
             raise ValueError(
                 "GITHUB_TOKEN must be set (env var or constructor arg)."
