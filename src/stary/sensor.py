@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from stary.jira_adapter import JiraComment
-from stary.ticket_status import DEFAULT_DONE_MARKER, DEFAULT_WIP_MARKER
+from stary.ticket_status import (
+    DEFAULT_DONE_MARKER,
+    DEFAULT_FAILED_MARKER,
+    DEFAULT_WIP_MARKER,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -36,6 +40,7 @@ class TriggerConfig:
     trigger_pr_only: str = TRIGGER_PR_ONLY
     wip_marker: str = DEFAULT_WIP_MARKER
     processed_marker: str = DEFAULT_DONE_MARKER
+    failed_marker: str = DEFAULT_FAILED_MARKER
 
 
 @dataclass
@@ -151,6 +156,7 @@ class TriggerDetector:
             f'OR comment ~ "\\"{self.config.trigger_pr_only}\\"") '
             f'AND NOT comment ~ "\\"{self.config.wip_marker}\\"" '
             f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
         )
 
     def parse_trigger_type(self, comments: list[JiraComment]) -> str | None:

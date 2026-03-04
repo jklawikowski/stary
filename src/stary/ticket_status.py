@@ -18,6 +18,7 @@ from typing import Protocol
 # ---------------------------------------------------------------------------
 DEFAULT_WIP_MARKER = "[~sys_qaplatformbot] stary:wip"
 DEFAULT_DONE_MARKER = "[~sys_qaplatformbot] stary:done"
+DEFAULT_FAILED_MARKER = "[~sys_qaplatformbot] stary:failed"
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ class StatusMarkerConfig:
 
     wip_marker: str = DEFAULT_WIP_MARKER
     done_marker: str = DEFAULT_DONE_MARKER
+    failed_marker: str = DEFAULT_FAILED_MARKER
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +114,33 @@ class TicketStatusMarker:
         self.jira.add_comment(ticket_key, comment_body)
         print(f"[TicketStatusMarker] Marked {ticket_key} as done (status={status}).")
 
+    def mark_failed(
+        self,
+        ticket_key: str,
+        failed_step: str,
+        error_message: str,
+        dagster_run_url: str | None = None,
+    ) -> None:
+        """Add a failure marker comment when the pipeline fails.
+
+        The failure marker indicates which step failed and provides a
+        short error summary. Full traceback is available in Dagster logs.
+
+        Args:
+            ticket_key: Jira issue key (e.g., "PROJ-123")
+            failed_step: Name of the op/step that failed
+            error_message: Short error description (not full traceback)
+            dagster_run_url: Optional URL to the Dagster pipeline run
+        """
+        comment_body = self.format_failed_comment(
+            failed_step, error_message, dagster_run_url
+        )
+        self.jira.add_comment(ticket_key, comment_body)
+        print(
+            f"[TicketStatusMarker] Marked {ticket_key} as failed "
+            f"(step={failed_step})."
+        )
+
     # ------------------------------------------------------------------
     # Comment formatting
     # ------------------------------------------------------------------
@@ -155,3 +184,33 @@ class TicketStatusMarker:
             f"PR: {pr_url}\n"
             f"Processed by stary automation."
         )
+
+    def format_failed_comment(
+        self,
+        failed_step: str,
+        error_message: str,
+        dagster_run_url: str | None = None,
+    ) -> str:
+        """Build the failure comment body.
+
+        Args:
+            failed_step: Name of the step that failed
+            error_message: Short error description
+            dagster_run_url: Optional URL to the Dagster pipeline run
+
+        Returns:
+            Formatted comment body
+        """
+        lines = [
+            self.config.failed_marker,
+            f"*Failed step:* {failed_step}",
+            "*Error:*",
+            "{noformat}",
+            error_message,
+            "{noformat}",
+            "",
+            "Pipeline execution failed. Check Dagster logs for full details.",
+        ]
+        if dagster_run_url:
+            lines.append(f"[View pipeline run|{dagster_run_url}]")
+        return "\n".join(lines)
