@@ -73,6 +73,11 @@ def jira_ticket_sensor() -> Generator:
         ticket_key = ticket.key
         ticket_url = ticket.url
         auto_merge = ticket.auto_merge
+        retry_count = ticket.retry_count
+
+        # Dynamic run_key: includes retry_count to allow Dagster to create
+        # new runs for retries (otherwise same run_key would be skipped)
+        run_key = f"stary-{ticket_key}-{retry_count}"
 
         run_config = {
             "ops": {
@@ -114,9 +119,9 @@ def jira_ticket_sensor() -> Generator:
         }
 
         yield RunRequest(
-            run_key=f"stary-{ticket_key}",
+            run_key=run_key,
             run_config=run_config,
-            tags={"ticket_key": ticket_key},
+            tags={"ticket_key": ticket_key, "retry_count": str(retry_count)},
         )
 
 

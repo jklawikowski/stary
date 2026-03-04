@@ -19,6 +19,10 @@ from typing import Protocol
 DEFAULT_WIP_MARKER = "[~sys_qaplatformbot] stary:wip"
 DEFAULT_DONE_MARKER = "[~sys_qaplatformbot] stary:done"
 DEFAULT_FAILED_MARKER = "[~sys_qaplatformbot] stary:failed"
+DEFAULT_RETRY_MARKER = "[~sys_qaplatformbot] retry"
+
+# Maximum number of retry attempts allowed per ticket
+MAX_RETRY_COUNT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +50,8 @@ class StatusMarkerConfig:
     wip_marker: str = DEFAULT_WIP_MARKER
     done_marker: str = DEFAULT_DONE_MARKER
     failed_marker: str = DEFAULT_FAILED_MARKER
+    retry_marker: str = DEFAULT_RETRY_MARKER
+    max_retry_count: int = MAX_RETRY_COUNT
 
 
 # ---------------------------------------------------------------------------
