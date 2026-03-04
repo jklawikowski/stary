@@ -5,6 +5,9 @@ specific comment markers. Uses JiraAdapter for API operations.
 
 This module focuses on trigger detection logic. Status marking is
 handled by TicketStatusMarker in ticket_status.py.
+
+The trigger user is the faceless/service account ``sys_qaplatformbot``,
+used for production automation.
 """
 
 from dataclasses import dataclass
@@ -16,8 +19,8 @@ from stary.ticket_status import DEFAULT_DONE_MARKER, DEFAULT_WIP_MARKER
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
-TRIGGER_COMMENT = "[~jklawiko] do it"
-TRIGGER_PR_ONLY = "[~jklawiko] pull request"
+TRIGGER_COMMENT = "[~sys_qaplatformbot] do it"
+TRIGGER_PR_ONLY = "[~sys_qaplatformbot] pull request"
 
 
 # ---------------------------------------------------------------------------

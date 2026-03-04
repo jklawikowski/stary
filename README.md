@@ -14,6 +14,13 @@ The pipeline can run either:
 - **Standalone** via `python -m stary.main` (orchestrator loop)
 - **Dagster-managed** via the `stary_pipeline_with_markers` job (sensor-driven)
 
+## Trigger Account
+
+The automation is triggered by mentioning the **faceless/service account**
+`sys_qaplatformbot` in a Jira comment.  This is a dedicated service account
+suitable for production use — personal accounts must not be used as trigger
+identities.
+
 ## Configuration
 
 All configuration is done through environment variables.  Copy `.env.example`
@@ -45,7 +52,7 @@ The URL is constructed as:
 **Example Jira WIP comment (with Dagster link):**
 
 ```
-[~jklawiko] stary:wip
+[~sys_qaplatformbot] stary:wip
 Pipeline has been triggered and is currently in progress.
 [View live pipeline status|https://dagster.example.com/runs/abc12345-def6-7890-ghij-klmnopqrstuv]
 ```
@@ -53,7 +60,7 @@ Pipeline has been triggered and is currently in progress.
 **Example Jira WIP comment (without `DAGSTER_BASE_URL` configured):**
 
 ```
-[~jklawiko] stary:wip
+[~sys_qaplatformbot] stary:wip
 Pipeline has been triggered and is currently in progress.
 ```
 

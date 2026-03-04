@@ -5,6 +5,9 @@ and provide status visibility.
 
 This module focuses on status marking logic. It uses JiraAdapter for
 actual API calls.
+
+The marker comments use the faceless/service account
+``sys_qaplatformbot`` for production automation.
 """
 
 from dataclasses import dataclass
@@ -13,8 +16,8 @@ from typing import Protocol
 # ---------------------------------------------------------------------------
 # Default marker strings
 # ---------------------------------------------------------------------------
-DEFAULT_WIP_MARKER = "[~jklawiko] stary:wip"
-DEFAULT_DONE_MARKER = "[~jklawiko] stary:done"
+DEFAULT_WIP_MARKER = "[~sys_qaplatformbot] stary:wip"
+DEFAULT_DONE_MARKER = "[~sys_qaplatformbot] stary:done"
 
 
 # ---------------------------------------------------------------------------
