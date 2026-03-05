@@ -44,3 +44,28 @@ def build_dagster_run_url(
         return None
     base = dagster_base_url.rstrip("/")
     return f"{base}/runs/{run_id}"
+
+
+# ---------------------------------------------------------------------------
+# Copilot SDK configuration
+# ---------------------------------------------------------------------------
+
+
+def get_copilot_github_token() -> Optional[str]:
+    """Return the GitHub token for Copilot SDK authentication.
+
+    Checks COPILOT_GITHUB_TOKEN first, then falls back to GH_TOKEN.
+    Returns None if neither is set.
+    """
+    token = os.environ.get("COPILOT_GITHUB_TOKEN", "").strip()
+    if token:
+        return token
+    return os.environ.get("GH_TOKEN", "").strip() or None
+
+
+def get_copilot_model() -> str:
+    """Return the model to use for Copilot SDK inference.
+
+    Defaults to 'gpt-4o' if COPILOT_MODEL is not set.
+    """
+    return os.environ.get("COPILOT_MODEL", "gpt-4o").strip()

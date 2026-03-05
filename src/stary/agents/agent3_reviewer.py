@@ -14,10 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 
-INFERENCE_URL = os.environ.get(
-    "AGENT3_INFERENCE_URL",
-    os.environ.get("INFERENCE_URL", "http://localhost:8080/v1/chat/completions"),
-)
+from stary.inference import InferenceClient, get_inference_client
 
 # File extensions considered relevant source code for context
 _SOURCE_EXTENSIONS = (
@@ -60,10 +57,10 @@ class ReviewerAgent:
 
     def __init__(
         self,
-        inference_url: str | None = None,
+        inference_client: InferenceClient | None = None,
         github_token: str | None = None,
     ):
-        self.inference_url = inference_url or INFERENCE_URL
+        self._inference = inference_client or get_inference_client()
         self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
         if not self.github_token:
             raise ValueError(
@@ -532,33 +529,20 @@ class ReviewerAgent:
         tag: str = "",
         temperature: float = 0.2,
     ) -> dict:
-        """Send a chat-completion request and parse the JSON response."""
-        payload = {
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-        }
-        url = self.inference_url
+        """Send a chat-completion request via inference client and parse the JSON response."""
         label = f"[Agent3/{tag}]" if tag else "[Agent3]"
-        print(f"{label} Calling LLM at {url} …")
+        print(f"{label} Calling inference…")
 
         try:
-            resp = requests.post(url, json=payload, timeout=300)
-            resp.raise_for_status()
-            data = resp.json()
-            content: str = data["choices"][0]["message"]["content"]
+            result = self._inference.chat_json(
+                system=system,
+                user=user,
+                temperature=temperature,
+                timeout=300.0,
+            )
+            print(f"{label} Got JSON response")
+            return result if result else {"approved": False, "comments": [], "summary": "Empty response"}
 
-            content = content.strip()
-            fence = re.search(r"```(?:json)?\s*\n(.*?)```", content, re.DOTALL)
-            if fence:
-                content = fence.group(1).strip()
-            return json.loads(content)
-
-        except requests.RequestException as exc:
+        except Exception as exc:
             print(f"{label} LLM request failed: {exc}")
             return {"approved": False, "comments": [], "summary": f"LLM request failed: {exc}"}
-        except (json.JSONDecodeError, KeyError, IndexError) as exc:
-            print(f"{label} Failed to parse LLM response: {exc}")
-            return {"approved": False, "comments": [], "summary": f"Failed to parse LLM response: {exc}"}

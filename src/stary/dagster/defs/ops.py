@@ -4,7 +4,7 @@ Each op wraps one agent step, matching the pattern from the qa-platform
 orchestrator (src/vistula/dagster/defs/ops.py).
 
 Ops:
-    read_jira_ticket   – Agent 1: parse Jira ticket via LLM
+    read_jira_ticket   – Agent 1: parse Jira ticket via LLM (Copilot SDK)
     implement_feature  – Agent 2: clone repo, generate code, push & create PR
     review_code        – Agent 3: review PR via LLM, post comments, merge
     mark_ticket_wip    – Sensor helper: mark Jira ticket as WIP
@@ -24,10 +24,9 @@ from stary.config import build_dagster_run_url, get_dagster_base_url
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Read and interpret a Jira ticket using Agent 1 (JiraReaderAgent).",
+    description="Read and interpret a Jira ticket using Agent 1 (JiraReaderAgent) via Copilot SDK.",
     config_schema={
         "ticket_url": str,
-        "inference_url": str,
         "jira_base_url": str,
         "jira_token": str,
     },
@@ -40,7 +39,6 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
 
     cfg = context.op_config
     agent = JiraReaderAgent(
-        inference_url=cfg["inference_url"],
         jira_base_url=cfg["jira_base_url"],
         jira_token=cfg["jira_token"],
     )
@@ -48,11 +46,29 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
     ticket_url = cfg["ticket_url"]
     context.log.info("Agent 1: reading ticket %s", ticket_url)
     task_input = agent.run(ticket_url)
+
+    # Diagnostic: log structure and key fields so we can spot corruption
     context.log.info(
         "Agent 1: produced %d task(s) for ticket %s",
         len(task_input.get("tasks", [])),
         task_input.get("ticket_id", "UNKNOWN"),
     )
+    context.log.info(
+        "Agent 1 output keys: %s | interpretation length: %d | "
+        "implementer_prompt length: %d | description length: %d",
+        list(task_input.keys()),
+        len(task_input.get("interpretation", "")),
+        len(task_input.get("implementer_prompt", "")),
+        len(task_input.get("description", "")),
+    )
+    context.log.info(f"Agent 1 implementer prompt: {task_input.get('implementer_prompt', '')}")
+    for i, t in enumerate(task_input.get("tasks", [])):
+        context.log.info(
+            "  Task %d: %s (detail: %d chars)",
+            i + 1,
+            t.get("title", "<no title>"),
+            len(t.get("detail", "")),
+        )
     return task_input
 
 
@@ -61,10 +77,7 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Implement features by cloning the repo, generating code via LLM, and creating a PR.",
-    config_schema={
-        "inference_url": str,
-    },
+    description="Implement features by cloning the repo, generating code via Copilot SDK, and creating a PR.",
     ins={"task_input": In(Dict)},
     out=Out(str),
 )
@@ -72,12 +85,21 @@ def implement_feature(context: OpExecutionContext, task_input: Dict) -> str:
     """Clone the target repo, generate code, commit/push, and create a PR."""
     from stary.agents import ImplementerAgent
 
-    cfg = context.op_config
-    agent = ImplementerAgent(inference_url=cfg["inference_url"])
+    agent = ImplementerAgent()
 
     context.log.info(
         "Agent 2: implementing ticket %s",
         task_input.get("ticket_id", "UNKNOWN"),
+    )
+    # Diagnostic: log what Agent 2 received from Agent 1
+    context.log.info(
+        "Agent 2 input keys: %s | tasks: %d | interpretation: %d chars | "
+        "implementer_prompt: %d chars | description: %d chars",
+        list(task_input.keys()),
+        len(task_input.get("tasks", [])),
+        len(task_input.get("interpretation", "")),
+        len(task_input.get("implementer_prompt", "")),
+        len(task_input.get("description", "")),
     )
     pr_url = agent.run(task_input)
     context.log.info("Agent 2: PR created at %s", pr_url)
@@ -89,9 +111,8 @@ def implement_feature(context: OpExecutionContext, task_input: Dict) -> str:
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Review the PR using Agent 3 (ReviewerAgent) – LLM-powered code review.",
+    description="Review the PR using Agent 3 (ReviewerAgent) – Copilot SDK-powered code review.",
     config_schema={
-        "inference_url": str,
         "auto_merge": Field(bool, default_value=True, is_required=False),
     },
     ins={"pr_url": In(str)},
@@ -102,7 +123,7 @@ def review_code(context: OpExecutionContext, pr_url: str) -> Dict[str, Any]:
     from stary.agents import ReviewerAgent
 
     cfg = context.op_config
-    agent = ReviewerAgent(inference_url=cfg["inference_url"])
+    agent = ReviewerAgent()
     auto_merge = cfg.get("auto_merge", True)
 
     context.log.info("Agent 3: reviewing PR %s (auto_merge=%s)", pr_url, auto_merge)

@@ -8,6 +8,7 @@ import time
 import requests
 
 from stary.agents import JiraReaderAgent, ImplementerAgent, ReviewerAgent
+from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
 from stary.sensor import TriggerConfig, TriggerDetector
 from stary.ticket_status import StatusMarkerConfig, TicketStatusMarker
@@ -18,10 +19,7 @@ POLL_INTERVAL = int(os.environ.get("SENSOR_POLL_INTERVAL", "60"))
 class Orchestrator:
     def __init__(
         self,
-        inference_url: str | None = None,
-        agent1_inference_url: str | None = None,
-        agent2_inference_url: str | None = None,
-        agent3_inference_url: str | None = None,
+        inference_client: InferenceClient | None = None,
         repo_path: str | None = None,
         jira_base_url: str | None = None,
         jira_token: str | None = None,
@@ -30,6 +28,9 @@ class Orchestrator:
         git_user_email: str | None = None,
         poll_interval: int | None = None,
     ):
+        # Create shared inference client
+        self._inference = inference_client or get_inference_client()
+
         # Create shared JiraAdapter
         self._jira = JiraAdapter(
             base_url=jira_base_url,
@@ -40,19 +41,19 @@ class Orchestrator:
         self._trigger_detector = TriggerDetector(self._jira)
         self._status_marker = TicketStatusMarker(self._jira)
 
-        # Create agents
+        # Create agents with shared inference client
         self.agent1 = JiraReaderAgent(
-            inference_url=agent1_inference_url or inference_url,
+            inference_client=self._inference,
             jira_adapter=self._jira,
         )
         self.agent2 = ImplementerAgent(
-            inference_url=agent2_inference_url or inference_url,
+            inference_client=self._inference,
             github_token=github_token,
             git_user_name=git_user_name,
             git_user_email=git_user_email,
         )
         self.agent3 = ReviewerAgent(
-            inference_url=agent3_inference_url or inference_url,
+            inference_client=self._inference,
             github_token=github_token,
         )
         self.poll_interval = poll_interval or POLL_INTERVAL

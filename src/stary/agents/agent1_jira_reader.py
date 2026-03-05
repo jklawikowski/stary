@@ -7,14 +7,8 @@ import os
 import re
 import xml.etree.ElementTree as ET
 
-import requests
-
+from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
-
-INFERENCE_URL = os.environ.get(
-    "AGENT1_INFERENCE_URL",
-    os.environ.get("INFERENCE_URL", "http://localhost:8080/v1/chat/completions"),
-)
 
 JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com")
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
@@ -63,12 +57,12 @@ class JiraReaderAgent:
 
     def __init__(
         self,
-        inference_url: str | None = None,
+        inference_client: InferenceClient | None = None,
         jira_base_url: str | None = None,
         jira_token: str | None = None,
         jira_adapter: JiraAdapter | None = None,
     ):
-        self.inference_url = inference_url or INFERENCE_URL
+        self._inference = inference_client or get_inference_client()
         self.jira_base_url = jira_base_url or JIRA_BASE_URL
         self.jira_token = jira_token or JIRA_TOKEN
 
@@ -187,42 +181,25 @@ class JiraReaderAgent:
             "tasks, and return the JSON as instructed."
         )
 
-        payload = {
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": 0.2,
-            "tool_choice": "none",
-        }
-        url = self.inference_url
-        print(f"[Agent1] Calling LLM at {url} …")
+        print(f"[Agent1] Calling inference for ticket interpretation\u2026")
 
         try:
-            response = requests.post(url, json=payload, timeout=120)
-            response.raise_for_status()
-            data = response.json()
-            print(f"[Agent1] LLM response data: {data}")
+            result = self._inference.chat_json(
+                system=_SYSTEM_PROMPT,
+                user=user_message,
+                temperature=0.2,
+                timeout=120.0,
+            )
+            print(f"[Agent1] LLM response: {result}")
 
-            content = data["choices"][0]["message"].get("content")
-            if not content:
-                print("[Agent1] LLM returned tool_calls or empty content instead of JSON. Retrying is needed.")
-                raise ValueError("LLM did not return text content — likely attempted tool calls.")
-            # Strip possible markdown code fences (even with surrounding prose)
-            content = content.strip()
-            fence_match = re.search(r"```(?:json)?\s*\n(.*)```", content, re.DOTALL)
-            if fence_match:
-                content = fence_match.group(1).strip()
-            elif content.startswith("```"):
-                content = content.split("\n", 1)[1]
-                if content.endswith("```"):
-                    content = content.rsplit("```", 1)[0]
-                content = content.strip()
+            if not result:
+                print("[Agent1] LLM returned empty response.")
+                raise ValueError("LLM returned empty response.")
 
-            return json.loads(content)
+            return result
 
-        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
-            print(f"[Agent1] Failed to parse LLM response: {exc}")
+        except Exception as exc:
+            print(f"[Agent1] Failed to get LLM response: {exc}")
             return {
                 "interpretation": description,
                 "tasks": [{"title": summary, "detail": description}],
