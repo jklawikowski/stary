@@ -30,15 +30,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com")
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
-INFERENCE_URL = os.environ.get("INFERENCE_URL", "http://localhost:8080/v1/chat/completions")
-AGENT1_INFERENCE_URL = os.environ.get("AGENT1_INFERENCE_URL", "")
-AGENT2_INFERENCE_URL = os.environ.get("AGENT2_INFERENCE_URL", "")
-AGENT3_INFERENCE_URL = os.environ.get("AGENT3_INFERENCE_URL", "")
-
-
-def _get_inference_url(agent_var: str) -> str:
-    """Return agent-specific URL if set, otherwise fall back to INFERENCE_URL."""
-    return os.environ.get(agent_var, "") or INFERENCE_URL
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +42,8 @@ def _get_inference_url(agent_var: str) -> str:
     minimum_interval_seconds=60,
     description=(
         "Polls Jira for tickets with the trigger comment. "
-        "Yields a RunRequest for each triggered ticket."
+        "Yields a RunRequest for each triggered ticket. "
+        "Uses Copilot SDK for LLM inference (requires COPILOT_GITHUB_TOKEN or GH_TOKEN)."
     ),
 )
 def jira_ticket_sensor() -> Generator:
@@ -60,6 +52,9 @@ def jira_ticket_sensor() -> Generator:
     Uses the TriggerDetector and JiraAdapter to query Jira for triggered
     tickets and yields a RunRequest for each one, passing all necessary
     configuration to the ops via run_config.
+
+    LLM inference is handled by the Copilot SDK which reads COPILOT_GITHUB_TOKEN
+    or GH_TOKEN from environment automatically.
     """
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
@@ -91,19 +86,12 @@ def jira_ticket_sensor() -> Generator:
                 "read_jira_ticket": {
                     "config": {
                         "ticket_url": ticket_url,
-                        "inference_url": _get_inference_url("AGENT1_INFERENCE_URL"),
                         "jira_base_url": jira_base_url,
                         "jira_token": jira_token,
                     }
                 },
-                "implement_feature": {
-                    "config": {
-                        "inference_url": _get_inference_url("AGENT2_INFERENCE_URL"),
-                    }
-                },
                 "review_code": {
                     "config": {
-                        "inference_url": _get_inference_url("AGENT3_INFERENCE_URL"),
                         "auto_merge": auto_merge,
                     }
                 },

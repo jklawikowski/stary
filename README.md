@@ -14,6 +14,19 @@ The pipeline can run either:
 - **Standalone** via `python -m stary.main` (orchestrator loop)
 - **Dagster-managed** via the `stary_pipeline_with_markers` job (sensor-driven)
 
+### Modular Inference
+
+The LLM inference layer is abstracted via the `stary.inference` module. This
+allows switching inference backends without modifying agent code.
+
+```
+Agents → InferenceClient (interface) → Backend (Copilot SDK, OpenAI, etc.)
+```
+
+To switch backends, set `INFERENCE_BACKEND` environment variable. Currently
+supported: `copilot` (default). Additional backends can be added by
+implementing the `InferenceClient` protocol.
+
 ## Trigger Account
 
 The automation is triggered by mentioning the **faceless/service account**
@@ -28,14 +41,15 @@ to `.env` and fill in values, or export them before running.
 
 | Variable | Required | Description |
 |---|---|---|
-| `INFERENCE_URL` | Yes | LLM chat-completion endpoint |
-| `AGENT1_INFERENCE_URL` | No | Override inference URL for Agent 1 |
-| `AGENT2_INFERENCE_URL` | No | Override inference URL for Agent 2 |
-| `AGENT3_INFERENCE_URL` | No | Override inference URL for Agent 3 |
+| `INFERENCE_BACKEND` | No | Inference backend to use (default: copilot) |
+| `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` | Yes* | GitHub token for Copilot SDK authentication |
+| `COPILOT_MODEL` | No | Model to use (default: gpt-4o) |
 | `JIRA_BASE_URL` | Yes | Base URL of your Jira instance |
 | `JIRA_TOKEN` | Yes | Bearer token for Jira REST API |
 | `GITHUB_TOKEN` | Yes | GitHub PAT for cloning and PR creation |
 | `DAGSTER_BASE_URL` | No | Base URL of the Dagster webserver UI (see below) |
+
+*Required when using the `copilot` backend.
 
 ### `DAGSTER_BASE_URL`
 

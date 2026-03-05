@@ -15,10 +15,7 @@ from urllib.parse import urlparse
 
 import requests
 
-INFERENCE_URL = os.environ.get(
-    "AGENT2_INFERENCE_URL",
-    os.environ.get("INFERENCE_URL", "http://localhost:8080/v1/chat/completions"),
-)
+from stary.inference import BaseInferenceClient, InferenceClient, get_inference_client
 PLAYGROUND_DIR = Path.home() / "playground"
 
 # Directories / patterns to skip while scanning the repo tree
@@ -48,12 +45,12 @@ class ImplementerAgent:
 
     def __init__(
         self,
-        inference_url: str | None = None,
+        inference_client: InferenceClient | None = None,
         github_token: str | None = None,
         git_user_name: str | None = None,
         git_user_email: str | None = None,
     ):
-        self.inference_url = inference_url or INFERENCE_URL
+        self._inference = inference_client or get_inference_client()
         self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
         self.git_user_name = git_user_name or os.environ.get("GIT_USER_NAME", "qaplatformbot")
         self.git_user_email = git_user_email or os.environ.get("GIT_USER_EMAIL", "sys_qaplatformbot@intel.com")
@@ -601,7 +598,7 @@ class ImplementerAgent:
 
             # Robust JSON extraction — the LLM often wraps JSON in prose
             # or markdown fences.
-            parsed = self._extract_json_array(raw_text)
+            parsed = BaseInferenceClient.extract_json_array(raw_text)
 
             if isinstance(parsed, list) and parsed:
                 return parsed
@@ -618,71 +615,6 @@ class ImplementerAgent:
         )
 
     # ------------------------------------------------------------------
-    # JSON extraction helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_json_array(text: str) -> Any:
-        """Best-effort extraction of a JSON array from *text*.
-
-        Handles:
-        - Raw JSON (no fences)
-        - JSON wrapped in markdown fences (``\\`\\`\\`json ... \\`\\`\\```)
-        - Commentary / prose before / after the JSON block
-        """
-        text = text.strip()
-
-        # 1. Try stripping markdown fences first
-        fence = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
-        if fence:
-            candidate = fence.group(1).strip()
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
-
-        # 2. Find the outermost [ ... ] bracket pair
-        start = text.find("[")
-        if start != -1:
-            # Walk forward to find matching ]
-            depth = 0
-            in_string = False
-            escape = False
-            end = -1
-            for i in range(start, len(text)):
-                ch = text[i]
-                if escape:
-                    escape = False
-                    continue
-                if ch == "\\":
-                    escape = True
-                    continue
-                if ch == '"' and not escape:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if ch == "[":
-                    depth += 1
-                elif ch == "]":
-                    depth -= 1
-                    if depth == 0:
-                        end = i
-                        break
-            if end != -1:
-                candidate = text[start:end + 1]
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError:
-                    pass
-
-        # 3. Last resort — try parsing the whole text
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-
-    # ------------------------------------------------------------------
     # LLM helpers
     # ------------------------------------------------------------------
 
@@ -695,52 +627,38 @@ class ImplementerAgent:
         temperature: float = 0.2,
         raw: bool = False,
     ) -> Any:
-        """Send a chat-completion request to the inference endpoint.
+        """Send a chat-completion request via inference client.
 
         Parameters
         ----------
         raw : bool
             If True, return the raw text content instead of parsing as JSON.
         """
-        payload = {
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-            "tool_choice": "none",
-            "tools": [],
-        }
-        url = self.inference_url
         label = f"[Agent2/{tag}]" if tag else "[Agent2]"
-        print(f"{label} Calling LLM at {url} …")
+        print(f"{label} Calling inference…")
 
         try:
-            resp = requests.post(url, json=payload, timeout=300)
-            resp.raise_for_status()
-            data = resp.json()
-            print(data)
-            content: str | None = data["choices"][0]["message"]["content"]
-
-            if content is None:
-                print(f"{label} LLM returned null content.")
-                return "" if raw else {}
-
             if raw:
-                return content.strip()
+                content = self._inference.chat(
+                    system=system,
+                    user=user,
+                    temperature=temperature,
+                    timeout=300.0,
+                )
+                print(f"{label} Got raw response ({len(content)} chars)")
+                return content.strip() if content else ""
+            else:
+                result = self._inference.chat_json(
+                    system=system,
+                    user=user,
+                    temperature=temperature,
+                    timeout=300.0,
+                )
+                print(f"{label} Got JSON response: {result}")
+                return result
 
-            # Parse JSON, stripping possible markdown fences
-            content = content.strip()
-            fence = re.search(r"```(?:json)?\s*\n(.*?)```", content, re.DOTALL)
-            if fence:
-                content = fence.group(1).strip()
-            return json.loads(content)
-
-        except requests.RequestException as exc:
+        except Exception as exc:
             print(f"{label} LLM request failed: {exc}")
-            return {} if not raw else ""
-        except (json.JSONDecodeError, KeyError, IndexError) as exc:
-            print(f"{label} Failed to parse LLM response: {exc}")
-            return {} if not raw else ""
+            return "" if raw else {}
 
 

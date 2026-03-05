@@ -11,6 +11,13 @@ Usage:
     # Legacy: run pipeline for a single XML file or ticket URL:
     python main.py sample_ticket_multiply.xml
     python main.py https://jira.devtools.intel.com/browse/PROJ-123
+
+Environment variables:
+    COPILOT_GITHUB_TOKEN or GH_TOKEN: GitHub token for Copilot SDK authentication
+    COPILOT_MODEL: Model to use (default: gpt-4o)
+    JIRA_BASE_URL: Jira server URL
+    JIRA_TOKEN: Jira API token
+    GITHUB_TOKEN: GitHub token for PR operations
 """
 
 import sys
@@ -20,10 +27,6 @@ from stary.orchestrator import Orchestrator
 
 def main():
     orch = Orchestrator(
-        inference_url=os.environ.get("INFERENCE_URL"),
-        agent1_inference_url=os.environ.get("AGENT1_INFERENCE_URL"),
-        agent2_inference_url=os.environ.get("AGENT2_INFERENCE_URL"),
-        agent3_inference_url=os.environ.get("AGENT3_INFERENCE_URL"),
         repo_path=os.environ.get("REPO_PATH"),
     )
 
