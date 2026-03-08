@@ -497,9 +497,20 @@ class ImplementerAgent:
             "technical details so they match reality.\n"
             "- If the context markdowns define conventions or architecture rules, "
             "tasks MUST follow them.\n\n"
+            "IMPORTANT — keep output compact. Another LLM will consume your "
+            "response as part of a larger prompt, so verbosity wastes context "
+            "budget and degrades downstream performance:\n"
+            "- `validation_notes`: 2-3 sentences max. Only mention corrections "
+            "actually made.\n"
+            "- `detail`: use terse bullet points, not paragraphs. Include only "
+            "what an implementer needs: target function/class names, key "
+            "constraints, and the specific change. Omit rationale and "
+            "background already visible in the context docs.\n"
+            "- `target_files`: list EVERY repo-relative path the task will "
+            "touch — this drives which source files the implementer sees.\n\n"
             "Return ONLY valid JSON (no markdown fences) with this schema:\n"
             "{\n"
-            '  "validation_notes": "<summary of mismatches found and corrections made>",\n'
+            '  "validation_notes": "<brief summary of corrections>",\n'
             '  "aligned_tasks": [\n'
             '    {"title": "...", "detail": "...", "target_files": ["path/in/repo", ...]},\n'
             "    ...\n"
@@ -517,7 +528,72 @@ class ImplementerAgent:
         return self._call_llm(system, user, tag="validate")
 
     # ------------------------------------------------------------------
-    # 5. Generate file contents via LLM
+    # 5. Filter sources relevant to implementation tasks
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _filter_sources_for_tasks(
+        aligned_tasks: list[dict],
+        source_snippets: dict[str, str],
+        max_bytes: int = 40_000,
+    ) -> dict[str, str]:
+        """Return only the source files that are relevant to the tasks.
+
+        Relevance is determined by:
+        1. Files explicitly listed in ``target_files`` of any aligned task.
+        2. Sibling files in the same directory as a target file (for import
+           context).
+        3. ``__init__.py`` files along the path of any target file.
+
+        The result is capped at *max_bytes* to keep the implement prompt
+        within model limits.
+        """
+        import os as _os
+
+        # Collect target paths from aligned tasks
+        target_paths: set[str] = set()
+        target_dirs: set[str] = set()
+        for task in aligned_tasks:
+            for tf in task.get("target_files", []):
+                target_paths.add(tf)
+                target_dirs.add(_os.path.dirname(tf))
+
+        # If validation produced no target_files, fall back to all snippets
+        # (capped by max_bytes below).
+        if not target_paths:
+            filtered = dict(source_snippets)
+        else:
+            # Bucket 1: exact target files
+            # Bucket 2: siblings in same dirs + __init__.py along path
+            filtered: dict[str, str] = {}
+            for rel, content in source_snippets.items():
+                if rel in target_paths:
+                    filtered[rel] = content
+                elif _os.path.dirname(rel) in target_dirs:
+                    filtered[rel] = content
+                elif rel.endswith("__init__.py"):
+                    # Include if it's a parent package of any target
+                    pkg_dir = _os.path.dirname(rel)
+                    if any(td.startswith(pkg_dir) for td in target_dirs):
+                        filtered[rel] = content
+
+        # Cap total size
+        result: dict[str, str] = {}
+        total = 0
+        for rel, content in filtered.items():
+            if total + len(content) > max_bytes:
+                remaining = max_bytes - total
+                if remaining > 200:
+                    result[rel] = content[:remaining] + "\n... (truncated)"
+                    total = max_bytes
+                break
+            result[rel] = content
+            total += len(content)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # 6. Generate file contents via LLM
     # ------------------------------------------------------------------
 
     def _generate_files_via_llm(
@@ -536,15 +612,27 @@ class ImplementerAgent:
         context_block = "\n\n".join(
             f"### {path}\n{content}" for path, content in context_docs.items()
         )
+
+        # Filter source snippets to only task-relevant files to keep the
+        # prompt within model context limits (prevents empty responses on
+        # large repos).
+        tasks_list = validated.get(
+            "aligned_tasks", task_input.get("tasks", [])
+        )
+        relevant_sources = self._filter_sources_for_tasks(
+            tasks_list, source_snippets,
+        )
+        print(
+            f"[Agent2] Filtered sources for implement: "
+            f"{len(relevant_sources)}/{len(source_snippets)} file(s), "
+            f"{sum(len(v) for v in relevant_sources.values())} bytes"
+        )
         source_block = "\n\n".join(
             f"### {path}\n```\n{content}\n```"
-            for path, content in source_snippets.items()
+            for path, content in relevant_sources.items()
         )
 
-        aligned_tasks = json.dumps(
-            validated.get("aligned_tasks", task_input.get("tasks", [])),
-            indent=2,
-        )
+        aligned_tasks = json.dumps(tasks_list, indent=2)
         validation_notes = validated.get("validation_notes", "")
         implementer_prompt = task_input.get("implementer_prompt", "")
 
@@ -584,17 +672,42 @@ class ImplementerAgent:
             "Generate the JSON array of file operations now."
         )
 
+        prompt_size = len(system) + len(user)
+        print(f"[Agent2/implement] Prompt size: {prompt_size} chars")
+
         max_attempts = 3
+        attempt_diagnostics: list[str] = []
+
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 print(
                     f"[Agent2/implement] Attempt {attempt}/{max_attempts} "
-                    f"— previous response was not valid JSON, retrying…"
+                    f"— previous attempt failed, retrying…"
                 )
-            raw_text = self._call_llm(system, user, tag="implement", raw=True)
+
+            # Call LLM — propagate errors so we can classify them
+            try:
+                raw_text = self._call_llm(
+                    system, user, tag="implement", raw=True,
+                    propagate_errors=True,
+                )
+            except Exception as exc:
+                reason = f"inference_error: {exc}"
+                attempt_diagnostics.append(f"  #{attempt}: {reason}")
+                print(f"[Agent2/implement] Attempt {attempt} failed: {reason}")
+                continue
 
             if not raw_text:
+                reason = "empty_response"
+                attempt_diagnostics.append(f"  #{attempt}: {reason}")
+                print(f"[Agent2/implement] Attempt {attempt} failed: {reason}")
                 continue
+
+            # Log full raw output to compute logs for deep debugging
+            print(
+                f"[Agent2/implement] Attempt {attempt} raw output "
+                f"({len(raw_text)} chars):\n{raw_text}"
+            )
 
             # Robust JSON extraction — the LLM often wraps JSON in prose
             # or markdown fences.
@@ -608,10 +721,26 @@ class ImplementerAgent:
                 for key in ("files", "file_ops", "operations", "changes"):
                     if isinstance(parsed.get(key), list):
                         return parsed[key]
+                reason = (
+                    f"wrong_schema: dict with keys {list(parsed.keys())}, "
+                    f"no recognized array key "
+                    f"(first 200 chars: {raw_text[:200]!r})"
+                )
+            elif isinstance(parsed, list):
+                reason = "empty_array: parsed as empty list"
+            else:
+                reason = (
+                    f"json_parse_failed "
+                    f"(first 200 chars: {raw_text[:200]!r})"
+                )
 
+            attempt_diagnostics.append(f"  #{attempt}: {reason}")
+            print(f"[Agent2/implement] Attempt {attempt} rejected: {reason}")
+
+        details = "\n".join(attempt_diagnostics)
         raise RuntimeError(
-            "[Agent2/implement] LLM failed to produce valid file operations "
-            f"after {max_attempts} attempts."
+            f"[Agent2/implement] LLM failed to produce valid file operations "
+            f"after {max_attempts} attempts.\n{details}"
         )
 
     # ------------------------------------------------------------------
@@ -626,6 +755,7 @@ class ImplementerAgent:
         tag: str = "",
         temperature: float = 0.2,
         raw: bool = False,
+        propagate_errors: bool = False,
     ) -> Any:
         """Send a chat-completion request via inference client.
 
@@ -633,6 +763,10 @@ class ImplementerAgent:
         ----------
         raw : bool
             If True, return the raw text content instead of parsing as JSON.
+        propagate_errors : bool
+            If True, re-raise exceptions instead of returning a fallback
+            value.  Useful when the caller needs to distinguish inference
+            failures from empty LLM responses.
         """
         label = f"[Agent2/{tag}]" if tag else "[Agent2]"
         print(f"{label} Calling inference…")
@@ -643,7 +777,7 @@ class ImplementerAgent:
                     system=system,
                     user=user,
                     temperature=temperature,
-                    timeout=300.0,
+                    timeout=900.0,
                 )
                 print(f"{label} Got raw response ({len(content)} chars)")
                 return content.strip() if content else ""
@@ -652,13 +786,15 @@ class ImplementerAgent:
                     system=system,
                     user=user,
                     temperature=temperature,
-                    timeout=300.0,
+                    timeout=900.0,
                 )
                 print(f"{label} Got JSON response: {result}")
                 return result
 
         except Exception as exc:
             print(f"{label} LLM request failed: {exc}")
+            if propagate_errors:
+                raise
             return "" if raw else {}
 
 

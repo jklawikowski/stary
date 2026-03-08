@@ -51,12 +51,15 @@ async def _run_chat(
     model: str,
     full_prompt: str,
     timeout: float,
+    disable_tools: bool = True,
 ) -> str:
     """Create a CopilotClient, send a prompt, collect the response, tear down.
 
     This function is designed to be called via ``asyncio.run()`` so it
     owns the entire event-loop lifecycle and never leaks handles.
     """
+    from typing import Any
+
     from copilot import CopilotClient
 
     client = CopilotClient({"github_token": github_token})
@@ -66,8 +69,16 @@ async def _run_chat(
     print("[CopilotInference] CopilotClient started.")
 
     try:
-        print(f"[CopilotInference] Creating session (model={model})\u2026")
-        session = await client.create_session({"model": model})
+        session_cfg: dict[str, Any] = {
+            "model": model,
+            "reasoning_effort": "high",
+        }
+        if disable_tools:
+            # Use a whitelist that matches no real tool name so the
+            # server exposes zero built-in tools to the model.
+            session_cfg["available_tools"] = ["_disabled_"]
+        print(f"[CopilotInference] Creating session (model={model}, tools={'off' if disable_tools else 'on'}, reasoning_effort=high)\u2026")
+        session = await client.create_session(session_cfg)
         print("[CopilotInference] Session created.")
 
         done = asyncio.Event()
@@ -144,9 +155,11 @@ class CopilotInferenceClient(BaseInferenceClient):
         self,
         github_token: str | None = None,
         model: str | None = None,
+        disable_tools: bool = True,
     ):
         self.github_token = github_token or _get_github_token()
         self.model = model or _get_model()
+        self.disable_tools = disable_tools
         print(f"[CopilotInference] Configured with model={self.model}")
 
     # ------------------------------------------------------------------
@@ -175,7 +188,10 @@ class CopilotInferenceClient(BaseInferenceClient):
 
         try:
             return asyncio.run(
-                _run_chat(self.github_token, self.model, full_prompt, timeout)
+                _run_chat(
+                    self.github_token, self.model, full_prompt, timeout,
+                    disable_tools=self.disable_tools,
+                )
             )
         except Exception as exc:
             print(f"[CopilotInference] chat() failed: {exc}")

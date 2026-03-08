@@ -151,13 +151,20 @@ class BaseInferenceClient(ABC):
 
         text = text.strip()
 
+        # Lenient decoder: allows unescaped control characters (tabs,
+        # newlines, etc.) inside JSON strings – a common LLM artefact.
+        _decoder = json.JSONDecoder(strict=False)
+
+        def _try_parse(s: str) -> Any:
+            return _decoder.decode(s)
+
         # 1. Try stripping markdown fences first
         fence = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
         if fence:
             candidate = fence.group(1).strip()
             try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
+                return _try_parse(candidate)
+            except (json.JSONDecodeError, ValueError):
                 pass
 
         # 2. Find the outermost [ ... ] bracket pair
@@ -190,12 +197,15 @@ class BaseInferenceClient(ABC):
             if end != -1:
                 candidate = text[start:end + 1]
                 try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError:
-                    pass
+                    return _try_parse(candidate)
+                except (json.JSONDecodeError, ValueError) as exc:
+                    print(
+                        f"[extract_json_array] Bracket-matched text "
+                        f"({len(candidate)} chars) failed to parse: {exc}"
+                    )
 
         # 3. Last resort — try parsing the whole text
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
+            return _try_parse(text)
+        except (json.JSONDecodeError, ValueError):
             return {}
