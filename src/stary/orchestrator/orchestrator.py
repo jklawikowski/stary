@@ -125,7 +125,7 @@ class Orchestrator:
         triggered = self._trigger_detector.poll()
 
         if not triggered:
-            print("[Orchestrator] No triggered tickets — nothing to do.")
+            print("[Orchestrator] No triggered tickets \u2014 nothing to do.")
             return []
 
         print(f"[Orchestrator] {len(triggered)} ticket(s) to process.")
@@ -135,25 +135,27 @@ class Orchestrator:
             key = ticket.key
             url = ticket.url
             auto_merge = ticket.auto_merge
+            trigger_author = ticket.trigger_author
+            mention_user = trigger_author or None
             print(f"\n[Orchestrator] >>> Processing {key}: {url} (auto_merge={auto_merge})")
             try:
-                self._status_marker.mark_wip(key)
+                self._status_marker.mark_wip(key, mention_user=mention_user)
                 result = self.run(url, auto_merge=auto_merge)
                 pr_url = result.get("pr_url", "N/A")
                 review = result.get("review", {})
                 verdict = "APPROVED" if review.get("approved") else "CHANGES_REQUESTED"
                 print(f"[Orchestrator] <<< {key} pipeline finished.")
-                self._status_marker.mark_done(key, pr_url=pr_url, status=verdict)
+                self._status_marker.mark_done(key, pr_url=pr_url, status=verdict, mention_user=mention_user)
                 processed.append(key)
             except Exception as exc:
                 print(f"[Orchestrator] <<< {key} pipeline FAILED: {exc}")
-                self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}")
+                self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}", mention_user=mention_user)
 
         return processed
 
     def run_forever(self) -> None:
         """Poll the sensor in a loop and process triggered tickets."""
-        print(f"[Orchestrator] Starting sensor loop — polling every {self.poll_interval}s")
+        print(f"[Orchestrator] Starting sensor loop \u2014 polling every {self.poll_interval}s")
 
         while True:
             try:
@@ -163,5 +165,5 @@ class Orchestrator:
             except Exception as exc:
                 print(f"[Orchestrator] Unexpected error: {exc}")
 
-            print(f"[Orchestrator] Sleeping {self.poll_interval}s …\n")
+            print(f"[Orchestrator] Sleeping {self.poll_interval}s \u2026\n")
             time.sleep(self.poll_interval)

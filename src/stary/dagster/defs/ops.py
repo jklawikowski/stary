@@ -139,7 +139,7 @@ def implement_feature(context: OpExecutionContext, planner_output: Dict) -> str:
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Review the PR using Reviewer – Copilot SDK-powered code review.",
+    description="Review the PR using Reviewer \u2013 Copilot SDK-powered code review.",
     config_schema={
         "auto_merge": Field(bool, default_value=True, is_required=False),
     },
@@ -171,6 +171,7 @@ def review_code(context: OpExecutionContext, pr_url: str) -> Dict[str, Any]:
         "ticket_key": str,
         "jira_base_url": str,
         "jira_token": str,
+        "trigger_author": Field(str, default_value="", is_required=False),
     },
     out=Out(Nothing),
 )
@@ -192,11 +193,13 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
     run_id = context.run_id
     dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
 
-    status_marker.mark_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
+    mention_user = cfg.get("trigger_author") or None
+    status_marker.mark_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url, mention_user=mention_user)
     context.log.info(
-        "Marked %s as WIP (dagster_run_url=%s)",
+        "Marked %s as WIP (dagster_run_url=%s, mention_user=%s)",
         cfg["ticket_key"],
         dagster_run_url or "N/A",
+        mention_user or "N/A",
     )
 
 
@@ -207,6 +210,7 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
         "status": str,
         "jira_base_url": str,
         "jira_token": str,
+        "trigger_author": Field(str, default_value="", is_required=False),
     },
     ins={"pr_url": In(str), "review_result": In(Dict)},
     out=Out(Nothing),
@@ -219,10 +223,12 @@ def mark_ticket_done(context: OpExecutionContext, pr_url: str, review_result: Di
     cfg = context.op_config
     jira = JiraAdapter(base_url=cfg["jira_base_url"], token=cfg["jira_token"])
     status_marker = TicketStatusMarker(jira)
-    status_marker.mark_done(cfg["ticket_key"], pr_url=pr_url, status=cfg["status"])
+    mention_user = cfg.get("trigger_author") or None
+    status_marker.mark_done(cfg["ticket_key"], pr_url=pr_url, status=cfg["status"], mention_user=mention_user)
     context.log.info(
-        "Marked %s as done (status=%s, pr=%s)",
+        "Marked %s as done (status=%s, pr=%s, mention_user=%s)",
         cfg["ticket_key"],
         cfg["status"],
         pr_url,
+        mention_user or "N/A",
     )
