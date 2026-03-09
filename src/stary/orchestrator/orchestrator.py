@@ -1,13 +1,13 @@
 """Orchestrator: owns the main loop.  Triggers the Sensor, decides whether
-to run the agent pipeline, and drives Agent1 -> Agent2 -> Agent3 for each
-triggered ticket."""
+to run the agent pipeline, and drives TaskReader -> Planner -> Implementer -> Reviewer
+for each triggered ticket."""
 
 import os
 import time
 
 import requests
 
-from stary.agents import JiraReaderAgent, ImplementerAgent, ReviewerAgent
+from stary.agents import TaskReader, Planner, Implementer, Reviewer
 from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
 from stary.sensor import TriggerConfig, TriggerDetector
@@ -42,24 +42,30 @@ class Orchestrator:
         self._status_marker = TicketStatusMarker(self._jira)
 
         # Create agents with shared inference client
-        self.agent1 = JiraReaderAgent(
+        self.task_reader = TaskReader(
             inference_client=self._inference,
             jira_adapter=self._jira,
         )
-        self.agent2 = ImplementerAgent(
+        self.planner = Planner(
             inference_client=self._inference,
             github_token=github_token,
             git_user_name=git_user_name,
             git_user_email=git_user_email,
         )
-        self.agent3 = ReviewerAgent(
+        self.implementer = Implementer(
+            inference_client=self._inference,
+            github_token=github_token,
+            git_user_name=git_user_name,
+            git_user_email=git_user_email,
+        )
+        self.reviewer = Reviewer(
             inference_client=self._inference,
             github_token=github_token,
         )
         self.poll_interval = poll_interval or POLL_INTERVAL
 
     # ------------------------------------------------------------------
-    # Run a single ticket through agent1 → agent2 → agent3
+    # Run a single ticket through TaskReader → Planner → Implementer → Reviewer
     # ------------------------------------------------------------------
 
     def run(self, ticket_input: str, auto_merge: bool = True) -> dict:
@@ -67,7 +73,7 @@ class Orchestrator:
 
         Args:
             ticket_input: A Jira ticket URL or a legacy XML file path.
-                Passed straight to Agent 1.
+                Passed straight to TaskReader.
             auto_merge: If True, merge PR automatically when code review passes.
                 If False, leave PR open even when approved.
         """
@@ -76,26 +82,36 @@ class Orchestrator:
         print("=" * 60)
         print("STEP 1: Reading Jira ticket")
         print("=" * 60)
-        task_input = self.agent1.run(ticket_input)
-        print(f"[Orchestrator] Agent 1 produced {len(task_input['tasks'])} task(s) for implementation.")
+        task_input = self.task_reader.run(ticket_input)
+        print(f"[Orchestrator] TaskReader produced {len(task_input['tasks'])} task(s) for implementation.")
 
         print(task_input)
-        # Step 2 – implement feature (clone, branch, commit, push)
-        print("\n" + "=" * 60)
-        print("STEP 2: Implementing feature")
-        print("=" * 60)
-        pr_url = self.agent2.run(task_input)
-        print(f"[Orchestrator] Agent 2 pr: {pr_url}")
 
-        # Step 3 – code review
+        # Step 2 – plan & validate against repo
         print("\n" + "=" * 60)
-        print(f"STEP 3: Code review (auto_merge={auto_merge})")
+        print("STEP 2: Planning & validating tasks")
         print("=" * 60)
-        review = self.agent3.run(pr_url, auto_merge=auto_merge)
-        print(f"[Orchestrator] Agent 3 verdict: {'APPROVED' if review.get('approved') else 'CHANGES REQUESTED'}")
+        planner_output = self.planner.run(task_input)
+        print(f"[Orchestrator] Planner validated: {planner_output.get('validation_notes', 'N/A')}")
+        print(f"[Orchestrator] Planner produced {len(planner_output.get('steps', []))} step(s).")
+
+        # Step 3 – implement feature (generate code, commit, push, PR)
+        print("\n" + "=" * 60)
+        print("STEP 3: Implementing feature")
+        print("=" * 60)
+        pr_url = self.implementer.run(planner_output)
+        print(f"[Orchestrator] Implementer PR: {pr_url}")
+
+        # Step 4 – code review
+        print("\n" + "=" * 60)
+        print(f"STEP 4: Code review (auto_merge={auto_merge})")
+        print("=" * 60)
+        review = self.reviewer.run(pr_url, auto_merge=auto_merge)
+        print(f"[Orchestrator] Reviewer verdict: {'APPROVED' if review.get('approved') else 'CHANGES REQUESTED'}")
 
         return {
             "task_input": task_input,
+            "planner_output": planner_output,
             "pr_url": pr_url,
             "review": review,
         }
@@ -121,10 +137,6 @@ class Orchestrator:
             auto_merge = ticket.auto_merge
             print(f"\n[Orchestrator] >>> Processing {key}: {url} (auto_merge={auto_merge})")
             try:
-                # In the standalone orchestrator path there is no Dagster
-                # run ID available, so the WIP comment will not contain a
-                # Dagster link (dagster_run_url=None).  The Dagster-managed
-                # pipeline (mark_ticket_wip op) handles this automatically.
                 self._status_marker.mark_wip(key)
                 result = self.run(url, auto_merge=auto_merge)
                 pr_url = result.get("pr_url", "N/A")
@@ -136,8 +148,6 @@ class Orchestrator:
             except Exception as exc:
                 print(f"[Orchestrator] <<< {key} pipeline FAILED: {exc}")
                 self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}")
-
-        return processed
 
         return processed
 

@@ -209,3 +209,96 @@ class BaseInferenceClient(ABC):
             return _try_parse(text)
         except (json.JSONDecodeError, ValueError):
             return {}
+
+    @staticmethod
+    def extract_partial_json_array(text: str) -> list:
+        """Extract complete JSON objects from a potentially truncated array.
+
+        When the LLM response is cut off by output-token limits the
+        JSON array ``[{...}, {...]`` is never closed.
+        ``extract_json_array`` fails in that case.  This method recovers
+        every *complete* top-level ``{...}`` object found inside the
+        (possibly truncated) array.
+
+        Returns a list of parsed dicts — may be empty.
+        """
+        if not text:
+            return []
+
+        text = text.strip()
+
+        # Strip markdown fences
+        fence = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
+        if fence:
+            text = fence.group(1).strip()
+
+        # Try a normal parse first (fast path)
+        try:
+            result = json.JSONDecoder(strict=False).decode(text)
+            if isinstance(result, list):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Locate the opening bracket
+        arr_start = text.find("[")
+        if arr_start == -1:
+            return []
+
+        # Scan for individual complete { ... } objects
+        objects: list = []
+        pos = arr_start + 1
+
+        while pos < len(text):
+            # Skip whitespace / commas between objects
+            while pos < len(text) and text[pos] in " \t\n\r,":
+                pos += 1
+
+            if pos >= len(text) or text[pos] == "]":
+                break
+
+            if text[pos] != "{":
+                break
+
+            # Find the matching closing brace
+            obj_start = pos
+            depth = 0
+            in_string = False
+            escape = False
+            obj_end = -1
+
+            for i in range(obj_start, len(text)):
+                ch = text[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        obj_end = i
+                        break
+
+            if obj_end == -1:
+                # Incomplete object — response was truncated mid-object
+                break
+
+            obj_text = text[obj_start : obj_end + 1]
+            try:
+                obj = json.JSONDecoder(strict=False).decode(obj_text)
+                objects.append(obj)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            pos = obj_end + 1
+
+        return objects

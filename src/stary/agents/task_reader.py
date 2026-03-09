@@ -1,4 +1,4 @@
-"""Agent 1: Reads a Jira ticket by URL (or from a legacy XML file),
+"""TaskReader – Reads a Jira ticket by URL (or from a legacy XML file),
 interprets the description via LLM, and prepares a structured prompt with
 task descriptions for downstream agents."""
 
@@ -50,7 +50,7 @@ Follow these steps:
 """
 
 
-class JiraReaderAgent:
+class TaskReader:
     """Fetches a Jira ticket by URL, sends its description to an LLM for
     interpretation, and produces a structured task list + implementer prompt
     for the next agent in the pipeline."""
@@ -77,7 +77,7 @@ class JiraReaderAgent:
     # ------------------------------------------------------------------
 
     def run(self, ticket_input: str) -> dict:
-        """Interpret a ticket and return structured input for Agent 2.
+        """Interpret a ticket and return structured input for downstream agents.
 
         Args:
             ticket_input: A Jira ticket URL
@@ -103,13 +103,13 @@ class JiraReaderAgent:
             # Legacy XML path
             ticket_id, summary, description = self._parse_xml(ticket_input)
             ticket_url = ""
-        print(f"[Agent1] Parsed ticket {ticket_id}")
+        print(f"[TaskReader] Parsed ticket {ticket_id}")
 
         # 2. Call LLM to interpret description and generate tasks ------------
         llm_output = self._interpret_with_llm(ticket_id, summary, description)
         print(llm_output)
 
-        # 3. Assemble result for Agent 2 -------------------------------------
+        # 3. Assemble result -------------------------------------------------
         result = {
             "ticket_id": ticket_id,
             "ticket_url": ticket_url,
@@ -120,7 +120,7 @@ class JiraReaderAgent:
             "implementer_prompt": llm_output.get("implementer_prompt", ""),
         }
 
-        print(f"[Agent1] LLM produced {len(result['tasks'])} task(s) for ticket {ticket_id}.")
+        print(f"[TaskReader] LLM produced {len(result['tasks'])} task(s) for ticket {ticket_id}.")
         return result
 
     # ------------------------------------------------------------------
@@ -138,7 +138,7 @@ class JiraReaderAgent:
         # URL form: https://jira.devtools.intel.com/browse/PROJ-123
         issue_key = JiraAdapter.extract_issue_key(ticket_url)
 
-        print(f"[Agent1] Fetching ticket {issue_key} from Jira …")
+        print(f"[TaskReader] Fetching ticket {issue_key} from Jira …")
         issue = self._jira.get_issue(issue_key, fields=["summary", "description"])
 
         return issue.key, issue.summary, issue.description
@@ -181,7 +181,7 @@ class JiraReaderAgent:
             "tasks, and return the JSON as instructed."
         )
 
-        print(f"[Agent1] Calling inference for ticket interpretation\u2026")
+        print(f"[TaskReader] Calling inference for ticket interpretation…")
 
         try:
             result = self._inference.chat_json(
@@ -190,16 +190,16 @@ class JiraReaderAgent:
                 temperature=0.2,
                 timeout=120.0,
             )
-            print(f"[Agent1] LLM response: {result}")
+            print(f"[TaskReader] LLM response: {result}")
 
             if not result:
-                print("[Agent1] LLM returned empty response.")
+                print("[TaskReader] LLM returned empty response.")
                 raise ValueError("LLM returned empty response.")
 
             return result
 
         except Exception as exc:
-            print(f"[Agent1] Failed to get LLM response: {exc}")
+            print(f"[TaskReader] Failed to get LLM response: {exc}")
             return {
                 "interpretation": description,
                 "tasks": [{"title": summary, "detail": description}],
@@ -208,4 +208,3 @@ class JiraReaderAgent:
                     f"Summary: {summary}\nDescription: {description}\n"
                 ),
             }
-

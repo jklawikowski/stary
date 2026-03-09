@@ -1,14 +1,15 @@
-"""Agent 3: Reviewer – acts as a senior architect performing an in-depth
-code review on a GitHub pull request.  Uses the GitHub API to fetch the PR
-diff and repository context (markdown docs, source files) without cloning
-the repo locally.  Sends everything to an LLM for structured review, then
-posts the review back to the PR via the GitHub API (APPROVE or
-REQUEST_CHANGES with inline comments)."""
+"""Reviewer – acts as a senior architect performing an in-depth code review
+on a GitHub pull request.  Uses the GitHub API to fetch the PR diff and
+repository context (markdown docs, source files) without cloning the repo
+locally.  Sends everything to an LLM for structured review, then posts the
+review back to the PR via the GitHub API (APPROVE or REQUEST_CHANGES with
+inline comments)."""
 
 import base64
 import json
 import os
 import re
+from collections import Counter
 from typing import Any
 from urllib.parse import urlparse
 
@@ -36,13 +37,27 @@ _IGNORED_DIRS = {
 
 _CONTEXT_MD_PATTERN = re.compile(r"\.md$", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# Prompt budget constants
+# ---------------------------------------------------------------------------
+_MAX_PROMPT_CHARS = 200_000
+_TREE_BUDGET      = 30_000
+_CONTEXT_BUDGET   = 40_000
+_SOURCE_BUDGET    = 80_000
+
+_LOW_PRIORITY_MD = re.compile(
+    r"(changelog|changes|history|migration|release|license|licence|authors"
+    r"|contributors|code.of.conduct)",
+    re.IGNORECASE,
+)
+
 # Regex to parse a GitHub PR URL
 _PR_URL_RE = re.compile(
     r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
 )
 
 
-class ReviewerAgent:
+class Reviewer:
     """Senior-architect code reviewer using the GitHub API.
 
     Pipeline
@@ -101,19 +116,19 @@ class ReviewerAgent:
         """
         # 0. Parse PR URL --------------------------------------------------
         owner, repo, pr_number = self._parse_pr_url(pr_url)
-        print(f"[Agent3] Reviewing PR #{pr_number} on {owner}/{repo}")
+        print(f"[Reviewer] Reviewing PR #{pr_number} on {owner}/{repo}")
 
         # 1. Fetch unified diff --------------------------------------------
         diff = self._fetch_pr_diff(owner, repo, pr_number)
-        print(f"[Agent3] Fetched diff ({len(diff)} chars).")
+        print(f"[Reviewer] Fetched diff ({len(diff)} chars).")
 
         # 2. Fetch repo tree (default branch) ------------------------------
         repo_tree = self._fetch_repo_tree(owner, repo)
-        print(f"[Agent3] Repo tree – {len(repo_tree)} file(s) found.")
+        print(f"[Reviewer] Repo tree – {len(repo_tree)} file(s) found.")
 
         # 3. Read markdown context docs ------------------------------------
         context_docs = self._fetch_context_markdowns(owner, repo, repo_tree)
-        print(f"[Agent3] Found {len(context_docs)} markdown context doc(s).")
+        print(f"[Reviewer] Found {len(context_docs)} markdown context doc(s).")
 
         # 4. Read key source files -----------------------------------------
         source_snippets = self._fetch_key_sources(owner, repo, repo_tree)
@@ -121,7 +136,7 @@ class ReviewerAgent:
         # 5. Compute basic diff stats --------------------------------------
         stats = self._compute_diff_stats(diff)
         print(
-            f"[Agent3] Diff stats – {stats['additions']} addition(s), "
+            f"[Reviewer] Diff stats – {stats['additions']} addition(s), "
             f"{stats['deletions']} deletion(s), {stats['files']} file(s)."
         )
 
@@ -139,12 +154,12 @@ class ReviewerAgent:
         status = "APPROVED" if review["approved"] else (
             f"CHANGES REQUESTED ({len(review['comments'])} comment(s))"
         )
-        print(f"[Agent3] Review verdict: {status}")
-        print(f"[Agent3] Summary: {review['summary']}")
+        print(f"[Reviewer] Review verdict: {status}")
+        print(f"[Reviewer] Summary: {review['summary']}")
         for i, c in enumerate(review["comments"], 1):
             sev = c.get("severity", "info").upper()
             fpath = c.get("file", "general")
-            print(f"[Agent3]   #{i} [{sev}] {fpath}: {c.get('comment', '')}")
+            print(f"[Reviewer]   #{i} [{sev}] {fpath}: {c.get('comment', '')}")
 
         # 7. Post review comments to GitHub --------------------------------
         comment_url = self._post_pr_comment(
@@ -158,9 +173,9 @@ class ReviewerAgent:
             merged = self._merge_pr(owner, repo, pr_number)
             review["merged"] = merged
         elif review["approved"] and not auto_merge:
-            print("[Agent3] PR approved but auto_merge=False, skipping merge.")
+            print("[Reviewer] PR approved but auto_merge=False, skipping merge.")
 
-        print(f"[Agent3] Review complete: {status}")
+        print(f"[Reviewer] Review complete: {status}")
         return review
 
     # ------------------------------------------------------------------
@@ -189,7 +204,7 @@ class ReviewerAgent:
             **self._gh_headers,
             "Accept": "application/vnd.github.v3.diff",
         }
-        print(f"[Agent3] GET {url} (diff)")
+        print(f"[Reviewer] GET {url} (diff)")
         resp = requests.get(url, headers=headers, timeout=60)
         resp.raise_for_status()
         return resp.text
@@ -211,7 +226,7 @@ class ReviewerAgent:
             f"https://api.github.com/repos/{owner}/{repo}"
             f"/git/trees/{default_branch}?recursive=1"
         )
-        print(f"[Agent3] GET {tree_url}")
+        print(f"[Reviewer] GET {tree_url}")
         resp = requests.get(tree_url, headers=self._gh_headers, timeout=60)
         resp.raise_for_status()
         data = resp.json()
@@ -238,13 +253,34 @@ class ReviewerAgent:
         repo: str,
         repo_tree: list[str],
     ) -> dict[str, str]:
-        """Fetch every .md file from the repo as architecture context."""
+        """Fetch markdown docs within a character budget.
+
+        Prioritises root-level and architecture docs over deeply nested
+        or auto-generated files.
+        """
+        md_paths = [r for r in repo_tree if _CONTEXT_MD_PATTERN.search(r)]
+
+        def _sort_key(p: str) -> tuple:
+            depth = p.count("/")
+            is_low = 1 if _LOW_PRIORITY_MD.search(p) else 0
+            return (is_low, depth, p)
+
+        md_paths.sort(key=_sort_key)
+
         docs: dict[str, str] = {}
-        for rel in repo_tree:
-            if _CONTEXT_MD_PATTERN.search(rel):
-                content = self._fetch_file_content(owner, repo, rel)
-                if content is not None:
-                    docs[rel] = content
+        total = 0
+        for rel in md_paths:
+            content = self._fetch_file_content(owner, repo, rel)
+            if content is None:
+                continue
+            if total + len(content) > _CONTEXT_BUDGET:
+                remaining = _CONTEXT_BUDGET - total
+                if remaining > 200:
+                    docs[rel] = content[:remaining] + "\n... (truncated)"
+                    total = _CONTEXT_BUDGET
+                break
+            docs[rel] = content
+            total += len(content)
         return docs
 
     # ------------------------------------------------------------------
@@ -285,7 +321,7 @@ class ReviewerAgent:
             if total >= max_bytes:
                 break
 
-        print(f"[Agent3] Fetched {len(snippets)} source file(s) ({total} bytes).")
+        print(f"[Reviewer] Fetched {len(snippets)} source file(s) ({total} bytes).")
         return snippets
 
     # ------------------------------------------------------------------
@@ -312,7 +348,7 @@ class ReviewerAgent:
             if dl:
                 return requests.get(dl, timeout=30).text
         except Exception as exc:
-            print(f"[Agent3] Could not fetch {path}: {exc}")
+            print(f"[Reviewer] Could not fetch {path}: {exc}")
         return None
 
     # ------------------------------------------------------------------
@@ -346,13 +382,11 @@ class ReviewerAgent:
     ) -> dict:
         """Send the diff together with repo context to the LLM for review."""
 
-        tree_str = "\n".join(repo_tree)
-        context_block = "\n\n".join(
-            f"### {path}\n{content}" for path, content in context_docs.items()
-        )
-        source_block = "\n\n".join(
-            f"### {path}\n```\n{content}\n```"
-            for path, content in source_snippets.items()
+        tree_str = self._build_tree_string(repo_tree)
+        context_block = self._cap_block(context_docs, _CONTEXT_BUDGET)
+        source_block = self._cap_block(
+            {p: f"```\n{c}\n```" for p, c in source_snippets.items()},
+            _SOURCE_BUDGET,
         )
 
         system = (
@@ -412,6 +446,20 @@ class ReviewerAgent:
             "Perform your review now."
         )
 
+        prompt_size = len(system) + len(user)
+        print(f"[Reviewer/review] Prompt size: {prompt_size} chars")
+
+        if prompt_size > _MAX_PROMPT_CHARS:
+            overshoot = prompt_size - _MAX_PROMPT_CHARS
+            print(
+                f"[Reviewer/review] WARNING: prompt exceeds budget by "
+                f"{overshoot} chars. Trimming."
+            )
+            user = user[: len(user) - overshoot - 100] + (
+                "\n\n... (context trimmed to fit model limits)\n\n"
+                "Perform your review now."
+            )
+
         return self._call_llm(system, user, tag="review")
 
     # ------------------------------------------------------------------
@@ -434,7 +482,7 @@ class ReviewerAgent:
 
         # Build a nicely formatted comment body
         body_parts: list[str] = []
-        body_parts.append("## Agent 3 – Automated Code Review\n")
+        body_parts.append("## Reviewer – Automated Code Review\n")
         body_parts.append(f"**Verdict:** {verdict}\n")
         if review.get("summary"):
             body_parts.append(f"**Summary:** {review['summary']}\n")
@@ -470,7 +518,7 @@ class ReviewerAgent:
             f"https://api.github.com/repos/{owner}/{repo}"
             f"/issues/{pr_number}/comments"
         )
-        print(f"[Agent3] POST {url}  (review comment)")
+        print(f"[Reviewer] POST {url}  (review comment)")
         try:
             resp = requests.post(
                 url, json={"body": body},
@@ -478,12 +526,12 @@ class ReviewerAgent:
             )
             resp.raise_for_status()
             comment_url = resp.json().get("html_url")
-            print(f"[Agent3] PR comment posted: {comment_url}")
+            print(f"[Reviewer] PR comment posted: {comment_url}")
             return comment_url
         except requests.RequestException as exc:
-            print(f"[Agent3] Failed to post PR comment: {exc}")
+            print(f"[Reviewer] Failed to post PR comment: {exc}")
             if hasattr(exc, "response") and exc.response is not None:
-                print(f"[Agent3] Response body: {exc.response.text}")
+                print(f"[Reviewer] Response body: {exc.response.text}")
             return None
 
     # ------------------------------------------------------------------
@@ -502,19 +550,19 @@ class ReviewerAgent:
             f"/pulls/{pr_number}/merge"
         )
         payload = {"merge_method": "rebase"}
-        print(f"[Agent3] PUT {url}  merge_method=rebase")
+        print(f"[Reviewer] PUT {url}  merge_method=rebase")
         try:
             resp = requests.put(
                 url, json=payload, headers=self._gh_headers, timeout=60,
             )
             resp.raise_for_status()
             msg = resp.json().get("message", "")
-            print(f"[Agent3] PR #{pr_number} merged successfully: {msg}")
+            print(f"[Reviewer] PR #{pr_number} merged successfully: {msg}")
             return True
         except requests.RequestException as exc:
-            print(f"[Agent3] Failed to merge PR #{pr_number}: {exc}")
+            print(f"[Reviewer] Failed to merge PR #{pr_number}: {exc}")
             if hasattr(exc, "response") and exc.response is not None:
-                print(f"[Agent3] Response body: {exc.response.text}")
+                print(f"[Reviewer] Response body: {exc.response.text}")
             return False
 
     # ------------------------------------------------------------------
@@ -530,7 +578,7 @@ class ReviewerAgent:
         temperature: float = 0.2,
     ) -> dict:
         """Send a chat-completion request via inference client and parse the JSON response."""
-        label = f"[Agent3/{tag}]" if tag else "[Agent3]"
+        label = f"[Reviewer/{tag}]" if tag else "[Reviewer]"
         print(f"{label} Calling inference…")
 
         try:
@@ -546,3 +594,51 @@ class ReviewerAgent:
         except Exception as exc:
             print(f"{label} LLM request failed: {exc}")
             return {"approved": False, "comments": [], "summary": f"LLM request failed: {exc}"}
+
+    # ------------------------------------------------------------------
+    # Prompt-building helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_tree_string(
+        repo_tree: list[str], budget: int = _TREE_BUDGET
+    ) -> str:
+        """Build a repo tree string that fits within *budget* characters."""
+        full = "\n".join(repo_tree)
+        if len(full) <= budget:
+            return full
+
+        dir_counts: Counter[str] = Counter()
+        for p in repo_tree:
+            parts = p.split("/")
+            key = "/".join(parts[:min(3, len(parts) - 1)]) + "/" if len(parts) > 1 else "(root)"
+            dir_counts[key] += 1
+
+        lines: list[str] = []
+        total_chars = 0
+        for d, cnt in dir_counts.most_common():
+            line = f"{d}  ({cnt} file{'s' if cnt != 1 else ''})"
+            if total_chars + len(line) + 1 > budget:
+                lines.append(f"... ({len(dir_counts) - len(lines)} more directories)")
+                break
+            lines.append(line)
+            total_chars += len(line) + 1
+        return "\n".join(sorted(lines))
+
+    @staticmethod
+    def _cap_block(
+        docs: dict[str, str], budget: int
+    ) -> str:
+        """Build a formatted context string capped to *budget* characters."""
+        parts: list[str] = []
+        total = 0
+        for path, content in docs.items():
+            block = f"### {path}\n{content}"
+            if total + len(block) > budget:
+                remaining = budget - total
+                if remaining > 200:
+                    parts.append(block[:remaining] + "\n... (truncated)")
+                break
+            parts.append(block)
+            total += len(block)
+        return "\n\n".join(parts)

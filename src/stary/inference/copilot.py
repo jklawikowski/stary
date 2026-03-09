@@ -71,13 +71,13 @@ async def _run_chat(
     try:
         session_cfg: dict[str, Any] = {
             "model": model,
-            "reasoning_effort": "high",
+            "reasoning_effort": "medium",
         }
         if disable_tools:
             # Use a whitelist that matches no real tool name so the
             # server exposes zero built-in tools to the model.
             session_cfg["available_tools"] = ["_disabled_"]
-        print(f"[CopilotInference] Creating session (model={model}, tools={'off' if disable_tools else 'on'}, reasoning_effort=high)\u2026")
+        print(f"[CopilotInference] Creating session (model={model}, tools={'off' if disable_tools else 'on'}, reasoning_effort=medium)\u2026")
         session = await client.create_session(session_cfg)
         print("[CopilotInference] Session created.")
 
@@ -99,10 +99,10 @@ async def _run_chat(
                     )
             elif etype == "session.idle":
                 done.set()
-            elif etype == "error":
+            elif etype in ("error", "session.error"):
                 detail = getattr(event.data, "message", None) or repr(event.data)
                 error_msg.append(detail)
-                print(f"[CopilotInference] SDK error event: {detail}")
+                print(f"[CopilotInference] SDK error event ({etype}): {detail}")
                 done.set()
 
         session.on(on_event)
