@@ -1,4 +1,4 @@
-"""Stary – Software Task Agentic Resolution sYstem."""
+"""Stary \u2013 Software Task Agentic Resolution sYstem."""
 
 from stary.jira_adapter import JiraAdapter, JiraComment, JiraIssue
 from stary.sensor import TriggerConfig, TriggerDetector, TriggeredTicket

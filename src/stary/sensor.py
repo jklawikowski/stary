@@ -10,7 +10,7 @@ The trigger user is the faceless/service account ``sys_qaplatformbot``,
 used for production automation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from stary.jira_adapter import JiraComment
@@ -19,6 +19,9 @@ from stary.ticket_status import (
     DEFAULT_FAILED_MARKER,
     DEFAULT_RETRY_MARKER,
     DEFAULT_WIP_MARKER,
+    DONE_MARKER_TAG,
+    FAILED_MARKER_TAG,
+    WIP_MARKER_TAG,
     MAX_RETRY_COUNT,
 )
 
@@ -28,6 +31,8 @@ from stary.ticket_status import (
 TRIGGER_COMMENT = "[~sys_qaplatformbot] do it"
 TRIGGER_PR_ONLY = "[~sys_qaplatformbot] pull request"
 TRIGGER_RETRY = "[~sys_qaplatformbot] retry"
+
+DEFAULT_BOT_ACCOUNT = "sys_qaplatformbot"
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +47,9 @@ class TriggerConfig:
     trigger_comment: str = TRIGGER_COMMENT
     trigger_pr_only: str = TRIGGER_PR_ONLY
     trigger_retry: str = TRIGGER_RETRY
-    wip_marker: str = DEFAULT_WIP_MARKER
-    processed_marker: str = DEFAULT_DONE_MARKER
-    failed_marker: str = DEFAULT_FAILED_MARKER
+    wip_marker: str = WIP_MARKER_TAG
+    processed_marker: str = DONE_MARKER_TAG
+    failed_marker: str = FAILED_MARKER_TAG
     retry_marker: str = DEFAULT_RETRY_MARKER
     max_retry_count: int = MAX_RETRY_COUNT
 
@@ -57,6 +62,7 @@ class TriggeredTicket:
     url: str
     auto_merge: bool
     retry_count: int = 0
+    trigger_author: str = DEFAULT_BOT_ACCOUNT
 
     def to_dict(self) -> dict:
         """Convert to dict for backward compatibility."""
@@ -65,6 +71,7 @@ class TriggeredTicket:
             "ticket_url": self.url,
             "auto_merge": self.auto_merge,
             "retry_count": self.retry_count,
+            "trigger_author": self.trigger_author,
         }
 
 
@@ -132,14 +139,14 @@ class TriggerDetector:
         Returns:
             List of TriggeredTicket objects
         """
-        print("[TriggerDetector] Querying Jira for tickets with trigger comment …")
+        print("[TriggerDetector] Querying Jira for tickets with trigger comment \u2026")
         issues = self._search_triggered_tickets()
         print(f"[TriggerDetector] JQL returned {len(issues)} candidate(s).")
 
         triggered: list[TriggeredTicket] = []
         for issue in issues:
             key = issue.key
-            trigger_type, retry_count = self._get_trigger_type(key)
+            trigger_type, retry_count, trigger_author = self._get_trigger_type(key)
             if trigger_type is None:
                 print(f"[TriggerDetector] {key}: trigger not valid, skipping.")
                 continue
@@ -150,7 +157,7 @@ class TriggerDetector:
             if retry_count > 0:
                 trigger_info += f", retry_count={retry_count}"
             print(
-                f"[TriggerDetector] Triggered: {key} → {ticket_url} "
+                f"[TriggerDetector] Triggered: {key} \u2192 {ticket_url} "
                 f"({trigger_info}, auto_merge={auto_merge})"
             )
             triggered.append(
@@ -159,6 +166,7 @@ class TriggerDetector:
                     url=ticket_url,
                     auto_merge=auto_merge,
                     retry_count=retry_count,
+                    trigger_author=trigger_author,
                 )
             )
 
@@ -178,29 +186,27 @@ class TriggerDetector:
         """
         return (
             'status != Closed AND status != Done AND status != Resolved '
-            f'AND (comment ~ "\\"{self.config.trigger_comment}\\"" '
-            f'OR comment ~ "\\"{self.config.trigger_pr_only}\\"" '
-            f'OR comment ~ "\\"{self.config.trigger_retry}\\"") '
-            f'AND NOT comment ~ "\\"{self.config.wip_marker}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
+            f'AND (comment ~ "\\"{ self.config.trigger_comment}\\"" '
+            f'OR comment ~ "\\"{ self.config.trigger_pr_only}\\"" '
+            f'OR comment ~ "\\"{ self.config.trigger_retry}\\"") '
+            f'AND NOT comment ~ "\\"{ self.config.wip_marker}\\"" '
+            f'AND NOT comment ~ "\\"{ self.config.processed_marker}\\"" '
         )
 
     def parse_trigger_type(
         self,
         comments: list[JiraComment],
-    ) -> tuple[str | None, int]:
+    ) -> tuple[str | None, int, str]:
         """Determine which trigger comment is present in a list of comments.
 
         Args:
             comments: List of JiraComment objects
 
         Returns:
-            Tuple of (trigger_type, retry_count) where:
+            Tuple of (trigger_type, retry_count, trigger_author) where:
             - trigger_type is "do_it", "pr_only", "retry", or None
             - retry_count is the number of retry comments (0 for non-retry triggers)
-
-        Priority: retry > do_it > pr_only (if retry is valid)
-        For retry triggers, validates that retry count is within limits.
+            - trigger_author is the username of the comment author that triggered
         """
         has_failed = any(
             self.config.failed_marker in c.body for c in comments
@@ -211,15 +217,18 @@ class TriggerDetector:
         if retry_count > 0 and has_failed:
             if retry_count <= self.config.max_retry_count:
                 if self._is_retry_newer_than_failed(comments):
-                    return "retry", retry_count
+                    author = self._find_trigger_author(
+                        comments, self.config.trigger_retry
+                    )
+                    return "retry", retry_count, author
                 # Retry comment exists but is older than failed marker
-                return None, 0
+                return None, 0, DEFAULT_BOT_ACCOUNT
             # Max retries exceeded
-            return None, 0
+            return None, 0, DEFAULT_BOT_ACCOUNT
 
         # If ticket has failed marker but no valid retry, reject
         if has_failed:
-            return None, 0
+            return None, 0, DEFAULT_BOT_ACCOUNT
 
         # Normal trigger detection
         has_do_it = any(
@@ -230,10 +239,31 @@ class TriggerDetector:
         )
 
         if has_do_it:
-            return "do_it", 0
+            author = self._find_trigger_author(
+                comments, self.config.trigger_comment
+            )
+            return "do_it", 0, author
         if has_pr_only:
-            return "pr_only", 0
-        return None, 0
+            author = self._find_trigger_author(
+                comments, self.config.trigger_pr_only
+            )
+            return "pr_only", 0, author
+        return None, 0, DEFAULT_BOT_ACCOUNT
+
+    def _find_trigger_author(
+        self,
+        comments: list[JiraComment],
+        marker: str,
+    ) -> str:
+        """Find the author of the last comment containing *marker*.
+
+        Returns the bot account name when no author can be determined.
+        """
+        author = DEFAULT_BOT_ACCOUNT
+        for c in comments:
+            if marker in c.body and c.author:
+                author = c.author
+        return author
 
     def _count_retry_comments(self, comments: list[JiraComment]) -> int:
         """Count the number of retry trigger comments.
@@ -281,11 +311,11 @@ class TriggerDetector:
         jql = self.build_jql()
         return self.jira.search_issues(jql, fields=["key"], max_results=50)
 
-    def _get_trigger_type(self, issue_key: str) -> tuple[str | None, int]:
+    def _get_trigger_type(self, issue_key: str) -> tuple[str | None, int, str]:
         """Determine which trigger comment is present for an issue.
 
         Returns:
-            Tuple of (trigger_type, retry_count)
+            Tuple of (trigger_type, retry_count, trigger_author)
         """
         comments = self.jira.get_comments(issue_key)
         return self.parse_trigger_type(comments)

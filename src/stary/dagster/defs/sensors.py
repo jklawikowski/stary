@@ -4,7 +4,7 @@ Mirrors the pattern from the qa-platform orchestrator
 (src/vistula/dagster/defs/sensors.py).
 
 Sensors:
-    jira_ticket_sensor – Polls Jira for triggered tickets and yields RunRequests
+    jira_ticket_sensor \u2013 Polls Jira for triggered tickets and yields RunRequests
 """
 
 import logging
@@ -69,6 +69,7 @@ def jira_ticket_sensor() -> Generator:
         ticket_url = ticket.url
         auto_merge = ticket.auto_merge
         retry_count = ticket.retry_count
+        trigger_author = ticket.trigger_author
 
         # Dynamic run_key: includes retry_count to allow Dagster to create
         # new runs for retries (otherwise same run_key would be skipped)
@@ -81,6 +82,7 @@ def jira_ticket_sensor() -> Generator:
                         "ticket_key": ticket_key,
                         "jira_base_url": jira_base_url,
                         "jira_token": jira_token,
+                        "trigger_author": trigger_author,
                     }
                 },
                 "read_jira_ticket": {
@@ -101,6 +103,7 @@ def jira_ticket_sensor() -> Generator:
                         "status": "COMPLETED",
                         "jira_base_url": jira_base_url,
                         "jira_token": jira_token,
+                        "trigger_author": trigger_author,
                     }
                 },
             }
@@ -237,12 +240,14 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
     run_config = dagster_run.run_config or {}
     ops_config = run_config.get("ops", {})
     ticket_key = None
+    trigger_author = None
 
-    # Try to get ticket_key from mark_ticket_wip or mark_ticket_done config
+    # Try to get ticket_key and trigger_author from mark_ticket_wip or mark_ticket_done config
     for op_name in ("mark_ticket_wip", "mark_ticket_done"):
         op_config = ops_config.get(op_name, {}).get("config", {})
         if "ticket_key" in op_config:
             ticket_key = op_config["ticket_key"]
+            trigger_author = op_config.get("trigger_author") or None
             break
 
     if not ticket_key:
@@ -274,6 +279,7 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
             failed_step=failed_step,
             error_message=error_message,
             dagster_run_url=dagster_run_url,
+            trigger_author=trigger_author,
         )
         logger.info(
             "Posted failure marker to Jira ticket %s (step: %s)",
