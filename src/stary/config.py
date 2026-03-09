@@ -4,6 +4,11 @@ import os
 import re
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Default bot / service account
+# ---------------------------------------------------------------------------
+DEFAULT_BOT_ACCOUNT = "sys_qaplatformbot"
+
 
 def get_dagster_base_url() -> Optional[str]:
     """Return the configured DAGSTER_BASE_URL, normalized (no trailing slash).

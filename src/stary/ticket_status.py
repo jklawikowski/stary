@@ -13,13 +13,15 @@ The marker comments use the faceless/service account
 from dataclasses import dataclass
 from typing import Protocol
 
+from stary.config import DEFAULT_BOT_ACCOUNT
+
 # ---------------------------------------------------------------------------
 # Default marker strings
 # ---------------------------------------------------------------------------
-DEFAULT_WIP_MARKER = "[~sys_qaplatformbot] stary:wip"
-DEFAULT_DONE_MARKER = "[~sys_qaplatformbot] stary:done"
-DEFAULT_FAILED_MARKER = "[~sys_qaplatformbot] stary:failed"
-DEFAULT_RETRY_MARKER = "[~sys_qaplatformbot] retry"
+DEFAULT_WIP_MARKER = f"[~{DEFAULT_BOT_ACCOUNT}] stary:wip"
+DEFAULT_DONE_MARKER = f"[~{DEFAULT_BOT_ACCOUNT}] stary:done"
+DEFAULT_FAILED_MARKER = f"[~{DEFAULT_BOT_ACCOUNT}] stary:failed"
+DEFAULT_RETRY_MARKER = f"[~{DEFAULT_BOT_ACCOUNT}] retry"
 
 # Maximum number of retry attempts allowed per ticket
 MAX_RETRY_COUNT = 3
@@ -52,6 +54,7 @@ class StatusMarkerConfig:
     failed_marker: str = DEFAULT_FAILED_MARKER
     retry_marker: str = DEFAULT_RETRY_MARKER
     max_retry_count: int = MAX_RETRY_COUNT
+    mention_user: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +83,24 @@ class TicketStatusMarker:
         self.config = config or StatusMarkerConfig()
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_marker(self, marker: str, mention_user: str | None = None) -> str:
+        """Return *marker* with the mention replaced when *mention_user* is set.
+
+        If *mention_user* is provided (non-empty), the default bot mention
+        ``[~sys_qaplatformbot]`` in *marker* is replaced with
+        ``[~mention_user]``.  Otherwise the marker is returned unchanged.
+        """
+        user = mention_user or self.config.mention_user
+        if not user:
+            return marker
+        return marker.replace(
+            f"[~{DEFAULT_BOT_ACCOUNT}]", f"[~{user}]"
+        )
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -87,6 +108,7 @@ class TicketStatusMarker:
         self,
         ticket_key: str,
         dagster_run_url: str | None = None,
+        mention_user: str | None = None,
     ) -> None:
         """Add a WIP marker comment to the ticket.
 
@@ -96,8 +118,9 @@ class TicketStatusMarker:
         Args:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             dagster_run_url: Optional URL to the Dagster pipeline run
+            mention_user: Optional Jira username to mention instead of the bot
         """
-        comment_body = self.format_wip_comment(dagster_run_url)
+        comment_body = self.format_wip_comment(dagster_run_url, mention_user=mention_user)
         self.jira.add_comment(ticket_key, comment_body)
         print(f"[TicketStatusMarker] Marked {ticket_key} as WIP.")
 
@@ -106,6 +129,7 @@ class TicketStatusMarker:
         ticket_key: str,
         pr_url: str,
         status: str,
+        mention_user: str | None = None,
     ) -> None:
         """Add a done marker comment with pipeline results.
 
@@ -115,8 +139,9 @@ class TicketStatusMarker:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             pr_url: URL to the created pull request
             status: Pipeline status (e.g., "APPROVED", "CHANGES_REQUESTED")
+            mention_user: Optional Jira username to mention instead of the bot
         """
-        comment_body = self.format_done_comment(pr_url, status)
+        comment_body = self.format_done_comment(pr_url, status, mention_user=mention_user)
         self.jira.add_comment(ticket_key, comment_body)
         print(f"[TicketStatusMarker] Marked {ticket_key} as done (status={status}).")
 
@@ -126,6 +151,7 @@ class TicketStatusMarker:
         failed_step: str,
         error_message: str,
         dagster_run_url: str | None = None,
+        mention_user: str | None = None,
     ) -> None:
         """Add a failure marker comment when the pipeline fails.
 
@@ -137,9 +163,10 @@ class TicketStatusMarker:
             failed_step: Name of the op/step that failed
             error_message: Short error description (not full traceback)
             dagster_run_url: Optional URL to the Dagster pipeline run
+            mention_user: Optional Jira username to mention instead of the bot
         """
         comment_body = self.format_failed_comment(
-            failed_step, error_message, dagster_run_url
+            failed_step, error_message, dagster_run_url, mention_user=mention_user
         )
         self.jira.add_comment(ticket_key, comment_body)
         print(
@@ -154,6 +181,7 @@ class TicketStatusMarker:
     def format_wip_comment(
         self,
         dagster_run_url: str | None = None,
+        mention_user: str | None = None,
     ) -> str:
         """Build the WIP comment body.
 
@@ -162,30 +190,39 @@ class TicketStatusMarker:
 
         Args:
             dagster_run_url: Optional URL to the Dagster pipeline run
+            mention_user: Optional Jira username to mention instead of the bot
 
         Returns:
             Formatted comment body
         """
+        marker = self._resolve_marker(self.config.wip_marker, mention_user)
         lines = [
-            self.config.wip_marker,
+            marker,
             "Pipeline has been triggered and is currently in progress.",
         ]
         if dagster_run_url:
             lines.append(f"[View live pipeline status|{dagster_run_url}]")
         return "\n".join(lines)
 
-    def format_done_comment(self, pr_url: str, status: str) -> str:
+    def format_done_comment(
+        self,
+        pr_url: str,
+        status: str,
+        mention_user: str | None = None,
+    ) -> str:
         """Build the done comment body.
 
         Args:
             pr_url: URL to the created pull request
             status: Pipeline status
+            mention_user: Optional Jira username to mention instead of the bot
 
         Returns:
             Formatted comment body
         """
+        marker = self._resolve_marker(self.config.done_marker, mention_user)
         return (
-            f"{self.config.done_marker}\n"
+            f"{marker}\n"
             f"Status: {status}\n"
             f"PR: {pr_url}\n"
             f"Processed by stary automation."
@@ -196,6 +233,7 @@ class TicketStatusMarker:
         failed_step: str,
         error_message: str,
         dagster_run_url: str | None = None,
+        mention_user: str | None = None,
     ) -> str:
         """Build the failure comment body.
 
@@ -203,12 +241,14 @@ class TicketStatusMarker:
             failed_step: Name of the step that failed
             error_message: Short error description
             dagster_run_url: Optional URL to the Dagster pipeline run
+            mention_user: Optional Jira username to mention instead of the bot
 
         Returns:
             Formatted comment body
         """
+        marker = self._resolve_marker(self.config.failed_marker, mention_user)
         lines = [
-            self.config.failed_marker,
+            marker,
             f"*Failed step:* {failed_step}",
             "*Error:*",
             "{noformat}",
