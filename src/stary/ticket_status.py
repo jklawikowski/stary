@@ -6,16 +6,22 @@ and provide status visibility.
 This module focuses on status marking logic. It uses JiraAdapter for
 actual API calls.
 
-The marker comments use the faceless/service account
-``sys_qaplatformbot`` for production automation.
+The marker comments mention the user who triggered the automation
+(the author of the triggering Jira comment).
 """
 
 from dataclasses import dataclass
 from typing import Protocol
 
 # ---------------------------------------------------------------------------
-# Default marker strings
+# Marker tag strings (without user mention prefix)
 # ---------------------------------------------------------------------------
+WIP_TAG = "stary:wip"
+DONE_TAG = "stary:done"
+FAILED_TAG = "stary:failed"
+RETRY_TAG = "retry"
+
+# Legacy default markers (used for detection in sensor)
 DEFAULT_WIP_MARKER = "[~sys_qaplatformbot] stary:wip"
 DEFAULT_DONE_MARKER = "[~sys_qaplatformbot] stary:done"
 DEFAULT_FAILED_MARKER = "[~sys_qaplatformbot] stary:failed"
@@ -55,6 +61,18 @@ class StatusMarkerConfig:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_marker_line(tag: str, trigger_author: str | None = None) -> str:
+    """Build a marker line, optionally prefixed with a user mention."""
+    if trigger_author:
+        return f"[~{trigger_author}] {tag}"
+    return tag
+
+
+# ---------------------------------------------------------------------------
 # Ticket Status Marker
 # ---------------------------------------------------------------------------
 
@@ -87,6 +105,7 @@ class TicketStatusMarker:
         self,
         ticket_key: str,
         dagster_run_url: str | None = None,
+        trigger_author: str | None = None,
     ) -> None:
         """Add a WIP marker comment to the ticket.
 
@@ -96,8 +115,12 @@ class TicketStatusMarker:
         Args:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             dagster_run_url: Optional URL to the Dagster pipeline run
+            trigger_author: Username of the person who triggered the pipeline
         """
-        comment_body = self.format_wip_comment(dagster_run_url)
+        comment_body = self.format_wip_comment(
+            dagster_run_url=dagster_run_url,
+            trigger_author=trigger_author,
+        )
         self.jira.add_comment(ticket_key, comment_body)
         print(f"[TicketStatusMarker] Marked {ticket_key} as WIP.")
 
@@ -106,6 +129,7 @@ class TicketStatusMarker:
         ticket_key: str,
         pr_url: str,
         status: str,
+        trigger_author: str | None = None,
     ) -> None:
         """Add a done marker comment with pipeline results.
 
@@ -115,8 +139,11 @@ class TicketStatusMarker:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             pr_url: URL to the created pull request
             status: Pipeline status (e.g., "APPROVED", "CHANGES_REQUESTED")
+            trigger_author: Username of the person who triggered the pipeline
         """
-        comment_body = self.format_done_comment(pr_url, status)
+        comment_body = self.format_done_comment(
+            pr_url, status, trigger_author=trigger_author,
+        )
         self.jira.add_comment(ticket_key, comment_body)
         print(f"[TicketStatusMarker] Marked {ticket_key} as done (status={status}).")
 
@@ -126,6 +153,7 @@ class TicketStatusMarker:
         failed_step: str,
         error_message: str,
         dagster_run_url: str | None = None,
+        trigger_author: str | None = None,
     ) -> None:
         """Add a failure marker comment when the pipeline fails.
 
@@ -137,9 +165,11 @@ class TicketStatusMarker:
             failed_step: Name of the op/step that failed
             error_message: Short error description (not full traceback)
             dagster_run_url: Optional URL to the Dagster pipeline run
+            trigger_author: Username of the person who triggered the pipeline
         """
         comment_body = self.format_failed_comment(
-            failed_step, error_message, dagster_run_url
+            failed_step, error_message, dagster_run_url,
+            trigger_author=trigger_author,
         )
         self.jira.add_comment(ticket_key, comment_body)
         print(
@@ -154,6 +184,7 @@ class TicketStatusMarker:
     def format_wip_comment(
         self,
         dagster_run_url: str | None = None,
+        trigger_author: str | None = None,
     ) -> str:
         """Build the WIP comment body.
 
@@ -162,30 +193,39 @@ class TicketStatusMarker:
 
         Args:
             dagster_run_url: Optional URL to the Dagster pipeline run
+            trigger_author: Username of the person who triggered the pipeline
 
         Returns:
             Formatted comment body
         """
+        marker_line = _build_marker_line(WIP_TAG, trigger_author)
         lines = [
-            self.config.wip_marker,
+            marker_line,
             "Pipeline has been triggered and is currently in progress.",
         ]
         if dagster_run_url:
             lines.append(f"[View live pipeline status|{dagster_run_url}]")
         return "\n".join(lines)
 
-    def format_done_comment(self, pr_url: str, status: str) -> str:
+    def format_done_comment(
+        self,
+        pr_url: str,
+        status: str,
+        trigger_author: str | None = None,
+    ) -> str:
         """Build the done comment body.
 
         Args:
             pr_url: URL to the created pull request
             status: Pipeline status
+            trigger_author: Username of the person who triggered the pipeline
 
         Returns:
             Formatted comment body
         """
+        marker_line = _build_marker_line(DONE_TAG, trigger_author)
         return (
-            f"{self.config.done_marker}\n"
+            f"{marker_line}\n"
             f"Status: {status}\n"
             f"PR: {pr_url}\n"
             f"Processed by stary automation."
@@ -196,6 +236,7 @@ class TicketStatusMarker:
         failed_step: str,
         error_message: str,
         dagster_run_url: str | None = None,
+        trigger_author: str | None = None,
     ) -> str:
         """Build the failure comment body.
 
@@ -203,12 +244,14 @@ class TicketStatusMarker:
             failed_step: Name of the step that failed
             error_message: Short error description
             dagster_run_url: Optional URL to the Dagster pipeline run
+            trigger_author: Username of the person who triggered the pipeline
 
         Returns:
             Formatted comment body
         """
+        marker_line = _build_marker_line(FAILED_TAG, trigger_author)
         lines = [
-            self.config.failed_marker,
+            marker_line,
             f"*Failed step:* {failed_step}",
             "*Error:*",
             "{noformat}",

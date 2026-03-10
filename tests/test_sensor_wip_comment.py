@@ -19,9 +19,11 @@ class TestFormatWipComment:
 
     def test_comment_without_url(self):
         marker = self._make_status_marker()
-        comment = marker.format_wip_comment(dagster_run_url=None)
+        comment = marker.format_wip_comment(trigger_author="john.doe", dagster_run_url=None)
         assert "Pipeline has been triggered and is currently in progress." in comment
         assert "View live pipeline status" not in comment
+        assert "[~john.doe]" in comment
+        assert "[~sys_qaplatformbot]" not in comment
         # Should not contain broken Jira markup
         assert "[|]" not in comment
         assert "[View live pipeline status|]" not in comment
@@ -29,20 +31,54 @@ class TestFormatWipComment:
     def test_comment_with_url(self):
         marker = self._make_status_marker()
         url = "https://dagster.example.com/runs/abc123"
-        comment = marker.format_wip_comment(dagster_run_url=url)
+        comment = marker.format_wip_comment(trigger_author="jane.smith", dagster_run_url=url)
         assert "Pipeline has been triggered and is currently in progress." in comment
         assert f"[View live pipeline status|{url}]" in comment
+        assert "[~jane.smith]" in comment
+        assert "[~sys_qaplatformbot]" not in comment
 
     def test_comment_with_empty_string_url(self):
         """Empty string should be treated like None."""
         marker = self._make_status_marker()
-        comment = marker.format_wip_comment(dagster_run_url="")
+        comment = marker.format_wip_comment(trigger_author="bob", dagster_run_url="")
         assert "View live pipeline status" not in comment
+        assert "[~bob]" in comment
 
     def test_wip_marker_present(self):
         marker = self._make_status_marker()
-        comment = marker.format_wip_comment()
+        comment = marker.format_wip_comment(trigger_author="someone")
         assert marker.config.wip_marker in comment
+
+    def test_trigger_author_john_doe(self):
+        """When trigger comment author is john.doe, the response mentions john.doe."""
+        marker = self._make_status_marker()
+        comment = marker.format_wip_comment(trigger_author="john.doe")
+        assert "[~john.doe]" in comment
+        assert "[~sys_qaplatformbot]" not in comment
+
+    def test_different_trigger_authors_produce_different_mentions(self):
+        """Different trigger authors produce different mentions."""
+        marker = self._make_status_marker()
+        comment_a = marker.format_wip_comment(trigger_author="alice")
+        comment_b = marker.format_wip_comment(trigger_author="bob")
+        assert "[~alice]" in comment_a
+        assert "[~bob]" not in comment_a
+        assert "[~bob]" in comment_b
+        assert "[~alice]" not in comment_b
+
+    def test_trigger_author_none_omits_mention(self):
+        """When trigger author is None, the mention is omitted entirely."""
+        marker = self._make_status_marker()
+        comment = marker.format_wip_comment(trigger_author=None)
+        assert "[~sys_qaplatformbot]" not in comment
+        assert "[~" not in comment
+
+    def test_trigger_author_empty_string_omits_mention(self):
+        """When trigger author is empty string, the mention is omitted entirely."""
+        marker = self._make_status_marker()
+        comment = marker.format_wip_comment(trigger_author="")
+        assert "[~sys_qaplatformbot]" not in comment
+        assert "[~" not in comment
 
 
 class TestMarkWip:
@@ -61,13 +97,15 @@ class TestMarkWip:
         )
         marker = TicketStatusMarker(jira)
         dagster_url = "https://dagster.example.com/runs/run-42"
-        marker.mark_wip("PROJ-1", dagster_run_url=dagster_url)
+        marker.mark_wip("PROJ-1", trigger_author="dev.user", dagster_run_url=dagster_url)
 
         mock_request.assert_called_once()
         call_kwargs = mock_request.call_args
         body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
         assert dagster_url in body["body"]
         assert "View live pipeline status" in body["body"]
+        assert "[~dev.user]" in body["body"]
+        assert "[~sys_qaplatformbot]" not in body["body"]
 
     @patch("stary.jira_adapter.requests.Session.request")
     def test_posts_comment_without_dagster_url(self, mock_request: MagicMock):
@@ -81,13 +119,15 @@ class TestMarkWip:
             token="fake-token",
         )
         marker = TicketStatusMarker(jira)
-        marker.mark_wip("PROJ-1")
+        marker.mark_wip("PROJ-1", trigger_author="dev.user")
 
         mock_request.assert_called_once()
         call_kwargs = mock_request.call_args
         body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
         assert "View live pipeline status" not in body["body"]
         assert "Pipeline has been triggered" in body["body"]
+        assert "[~dev.user]" in body["body"]
+        assert "[~sys_qaplatformbot]" not in body["body"]
 
     @patch("stary.jira_adapter.requests.Session.request")
     def test_mark_wip_no_url_arg(self, mock_request: MagicMock):
@@ -103,5 +143,5 @@ class TestMarkWip:
         )
         marker = TicketStatusMarker(jira)
         # Should not raise
-        marker.mark_wip("PROJ-1")
+        marker.mark_wip("PROJ-1", trigger_author="someone")
         mock_request.assert_called_once()
