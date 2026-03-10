@@ -54,9 +54,9 @@ class Implementer:
         Parameters
         ----------
         planner_output : dict
-            Lean output from the Planner:
-            - steps            : list[dict]  discrete implementation steps
-            - validation_notes : str
+            Output from the Planner:
+            - steps       : list[dict]  each has 'prompt' (str) plus
+                            optional keys like 'target_files'
             - repo_url         : str
             - repo_path        : str    (local clone path)
             - branch_name      : str
@@ -77,7 +77,6 @@ class Implementer:
         ticket_id = planner_output["ticket_id"]
         summary = planner_output["summary"]
         steps = planner_output["steps"]
-        validation_notes = planner_output.get("validation_notes", "")
 
         print(f"[Implementer] Ticket   : {ticket_id}")
         print(f"[Implementer] Repo     : {repo_url}")
@@ -91,15 +90,15 @@ class Implementer:
         # 1. Iterate over each step, calling LLM separately ----------------
         total_ops = 0
         for idx, step in enumerate(steps, 1):
-            title = step.get("title", f"Step {idx}")
-            print(f"\n[Implementer] --- Step {idx}/{len(steps)}: {title} ---")
+            label = step.get("prompt", "")[:60]
+            print(f"\n[Implementer] --- Step {idx}/{len(steps)}: {label}... ---")
 
             # Read source files relevant to THIS step
             step_sources = self._read_step_sources(step, repo_tree)
 
             # Call LLM for this single step
             file_ops = self._implement_step(
-                step, idx, len(steps), validation_notes,
+                step, idx, len(steps),
                 tree_str, context_block, step_sources,
             )
             print(f"[Implementer]   LLM produced {len(file_ops)} file op(s)")
@@ -189,7 +188,6 @@ class Implementer:
         step: dict,
         step_idx: int,
         total_steps: int,
-        validation_notes: str,
         tree_str: str,
         context_block: str,
         step_sources: dict[str, str],
@@ -198,7 +196,7 @@ class Implementer:
 
         system = self._step_system_prompt()
         user = self._build_step_user(
-            step, step_idx, total_steps, validation_notes,
+            step, step_idx, total_steps,
             tree_str, context_block, step_sources,
         )
 
@@ -211,7 +209,7 @@ class Implementer:
 
         raise RuntimeError(
             f"[Implementer] LLM failed to produce valid file operations "
-            f"for step {step_idx} ('{step.get('title', '')}') "
+            f"for step {step_idx} "
             f"after {self._STEP_MAX_RETRIES} attempts."
         )
 
@@ -252,24 +250,40 @@ class Implementer:
         step: dict,
         step_idx: int,
         total_steps: int,
-        validation_notes: str,
         tree_str: str,
         context_block: str,
         step_sources: dict[str, str],
     ) -> str:
-        """Build the user prompt for a single implementation step."""
-        step_json = json.dumps(step, indent=2)
-        target_list = ", ".join(f"`{f}`" for f in step.get("target_files", []))
+        """Build the user prompt for a single implementation step.
+
+        Uses the step's ``prompt`` field as the core instruction and
+        supplements it with repo tree, context docs, and source code.
+        Any additional keys in *step* (beyond ``prompt`` and
+        ``target_files``) are serialised as extra context.
+        """
+        step_prompt = step.get("prompt", "")
+
+        # Collect any extra metadata the Planner attached to the step
+        extra_keys = {
+            k: v for k, v in step.items()
+            if k not in ("prompt", "target_files") and v
+        }
+        extra_block = ""
+        if extra_keys:
+            extra_block = (
+                "## Additional step metadata\n"
+                f"```json\n{json.dumps(extra_keys, indent=2)}\n```\n\n"
+            )
+
         source_block = "\n\n".join(
             f"### {path}\n```\n{content}\n```"
             for path, content in step_sources.items()
         )
 
         user = (
-            f"## Current step ({step_idx} of {total_steps})\n"
-            f"```json\n{step_json}\n```\n\n"
-            f"## Validation notes\n{validation_notes}\n\n"
-            f"## Target files for this step\n{target_list or '(none specified)'}\n\n"
+            f"## Implementation instruction (step {step_idx} of {total_steps})\n"
+            f"{step_prompt}\n\n"
+            f"{extra_block}"
             f"## Repository file tree\n```\n{tree_str}\n```\n\n"
             f"## Architecture / convention documents\n{context_block or '(none)'}\n\n"
             f"## Existing source code (files relevant to this step)\n"
@@ -284,17 +298,15 @@ class Implementer:
                 f"[Implementer/step{step_idx}] WARNING: prompt ({prompt_size} chars) "
                 f"exceeds budget. Trimming source block by {overshoot} chars."
             )
-            # Trim the source block (largest section)
             max_source = len(source_block) - overshoot - 200
             if max_source > 200:
                 source_block_trimmed = source_block[:max_source] + "\n... (trimmed)"
             else:
-                source_block_trimmed = "(trimmed — step detail and tree should suffice)"
+                source_block_trimmed = "(trimmed — step instruction and tree should suffice)"
             user = (
-                f"## Current step ({step_idx} of {total_steps})\n"
-                f"```json\n{step_json}\n```\n\n"
-                f"## Validation notes\n{validation_notes}\n\n"
-                f"## Target files for this step\n{target_list or '(none specified)'}\n\n"
+                f"## Implementation instruction (step {step_idx} of {total_steps})\n"
+                f"{step_prompt}\n\n"
+                f"{extra_block}"
                 f"## Repository file tree\n```\n{tree_str}\n```\n\n"
                 f"## Architecture / convention documents\n{context_block or '(none)'}\n\n"
                 f"## Existing source code (files relevant to this step)\n"

@@ -92,7 +92,6 @@ class Orchestrator:
         print("STEP 2: Planning & validating tasks")
         print("=" * 60)
         planner_output = self.planner.run(task_input)
-        print(f"[Orchestrator] Planner validated: {planner_output.get('validation_notes', 'N/A')}")
         print(f"[Orchestrator] Planner produced {len(planner_output.get('steps', []))} step(s).")
 
         # Step 3 – implement feature (generate code, commit, push, PR)

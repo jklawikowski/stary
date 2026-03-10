@@ -98,18 +98,16 @@ class Planner:
 
         Returns
         -------
-        dict  – Lean context for the Implementer (no raw task_input or
-        bulk source_snippets – those are redundant once tasks are
-        validated and the Implementer reads files on demand per step):
-            - steps            : list[dict]  discrete implementation steps
-            - validation_notes : str
-            - repo_url         : str
-            - repo_path        : str    (local clone path)
-            - branch_name      : str
-            - repo_tree        : list[str]
-            - context_docs     : dict[str, str]
-            - ticket_id        : str
-            - summary          : str
+        dict  – Context for the Implementer:
+            - steps       : list[dict]  each has 'prompt' (str, required)
+                            plus optional keys like 'target_files'
+            - repo_url    : str
+            - repo_path   : str    (local clone path)
+            - branch_name : str
+            - repo_tree   : list[str]
+            - context_docs: dict[str, str]
+            - ticket_id   : str
+            - summary     : str
         """
         # 0. Extract repo info from input ----------------------------------
         repo_url = self._extract_repo_url(task_input)
@@ -151,16 +149,15 @@ class Planner:
             # Convert raw tasks into the step format the Implementer expects
             fallback_steps = [
                 {
-                    "title": t.get("title", f"Task {i+1}"),
-                    "detail": t.get("detail", ""),
+                    "prompt": (
+                        f"Implement: {t.get('title', f'Task {i+1}')}\n\n"
+                        f"{t.get('detail', '')}"
+                    ),
                     "target_files": t.get("target_files", []),
                 }
                 for i, t in enumerate(task_input.get("tasks", []))
             ]
-            validated = {
-                "validation_notes": "Validation skipped (LLM returned empty response)",
-                "steps": fallback_steps,
-            }
+            validated = {"steps": fallback_steps}
         else:
             print("[Planner] Task validation & alignment done.")
             print(validated)
@@ -173,7 +170,6 @@ class Planner:
 
         return {
             "steps": validated["steps"],
-            "validation_notes": validated.get("validation_notes", ""),
             "repo_url": repo_url,
             "repo_path": self.repo_path,
             "branch_name": branch_name,
@@ -454,32 +450,33 @@ class Planner:
             "- Identify file-path mismatches, missing modules, naming inconsistencies, "
             "or assumptions that contradict the real code.\n"
             "- Break the work into discrete, self-contained IMPLEMENTATION STEPS.\n"
-            "  Each step will be sent to an implementer LLM in a SEPARATE call, "
-            "  so every step must be independently understandable.\n"
+            "  Each step will be sent to an implementer LLM in a SEPARATE call.\n"
             "- Preserve the intent of each task but rewrite paths, module names, and "
             "technical details so they match reality.\n"
             "- If the context markdowns define conventions or architecture rules, "
             "steps MUST follow them.\n\n"
-            "IMPORTANT — keep output compact. Another LLM will consume each step "
-            "as a separate prompt, so verbosity wastes context budget:\n"
-            "- `validation_notes`: 2-3 sentences max. Only mention corrections "
-            "actually made.\n"
-            "- Each step `detail`: precise bullet points describing WHAT to "
-            "implement — target function/class names, parameters, return types, "
-            "key constraints, and the specific change. Enough detail that an "
-            "implementer can produce the code without further questions.\n"
-            "- `target_files`: list EVERY repo-relative path the step will "
-            "read or modify — the implementer reads ONLY these files.\n"
-            "  CRITICAL: every entry in `target_files` MUST be a concrete FILE "
-            "  path that appears in the repository file tree provided below. "
-            "  NEVER use directory paths (e.g. 'src/', 'scripts/'). If a step "
-            "  touches multiple files in a directory, list each file explicitly.\n"
+            "Each step MUST have a `prompt` field — a COMPLETE, SELF-CONTAINED "
+            "instruction for the implementer LLM. The implementer receives ONLY "
+            "this prompt plus relevant source code. The prompt must include:\n"
+            "- Precise description of WHAT to implement — target function/class "
+            "names, parameters, return types, key constraints.\n"
+            "- Any corrections or context from your validation (do NOT put "
+            "validation notes in a separate field — embed them in the prompt).\n"
+            "- Enough detail that the implementer can produce the code without "
+            "further questions.\n\n"
+            "Each step MAY optionally include `target_files` — a list of "
+            "repo-relative file paths the step will read or modify. This helps "
+            "the implementer load the right source files.\n"
+            "  If provided, every entry MUST be a concrete FILE path from the "
+            "  repository file tree. NEVER use directory paths (e.g. 'src/'). "
+            "  If a step touches multiple files in a directory, list each "
+            "  file explicitly.\n\n"
             "- Order steps so earlier steps don't depend on later ones.\n\n"
             "Return ONLY valid JSON (no markdown fences) with this schema:\n"
             "{\n"
-            '  "validation_notes": "<brief summary of corrections>",\n'
             '  "steps": [\n'
-            '    {"title": "...", "detail": "...", "target_files": ["path/in/repo", ...]},\n'
+            '    {"prompt": "<complete implementer instruction>", '
+            '"target_files": ["path/in/repo", ...]},\n'
             "    ...\n"
             "  ]\n"
             "}"

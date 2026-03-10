@@ -98,12 +98,11 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
         planner_output.get("branch_name", "UNKNOWN"),
         len(planner_output.get("steps", [])),
     )
-    context.log.info("Planner validation notes: %s", planner_output.get("validation_notes", ""))
     for i, step in enumerate(planner_output.get("steps", [])):
         context.log.info(
             "  Step %d: %s (target_files: %s)",
             i + 1,
-            step.get("title", "<no title>"),
+            step.get("prompt", ""),
             step.get("target_files", []),
         )
     return planner_output
