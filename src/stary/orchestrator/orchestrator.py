@@ -134,19 +134,20 @@ class Orchestrator:
             key = ticket.key
             url = ticket.url
             auto_merge = ticket.auto_merge
+            trigger_author = ticket.trigger_author
             print(f"\n[Orchestrator] >>> Processing {key}: {url} (auto_merge={auto_merge})")
             try:
-                self._status_marker.mark_wip(key)
+                self._status_marker.mark_wip(key, trigger_author=trigger_author)
                 result = self.run(url, auto_merge=auto_merge)
                 pr_url = result.get("pr_url", "N/A")
                 review = result.get("review", {})
                 verdict = "APPROVED" if review.get("approved") else "CHANGES_REQUESTED"
                 print(f"[Orchestrator] <<< {key} pipeline finished.")
-                self._status_marker.mark_done(key, pr_url=pr_url, status=verdict)
+                self._status_marker.mark_done(key, pr_url=pr_url, status=verdict, trigger_author=trigger_author)
                 processed.append(key)
             except Exception as exc:
                 print(f"[Orchestrator] <<< {key} pipeline FAILED: {exc}")
-                self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}")
+                self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}", trigger_author=trigger_author)
 
         return processed
 
