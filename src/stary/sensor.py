@@ -24,6 +24,7 @@ from stary.ticket_status import (
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
+# Used for trigger detection only — response mentions use trigger_author.
 # ---------------------------------------------------------------------------
 TRIGGER_COMMENT = "[~sys_qaplatformbot] do it"
 TRIGGER_PR_ONLY = "[~sys_qaplatformbot] pull request"
@@ -57,6 +58,7 @@ class TriggeredTicket:
     url: str
     auto_merge: bool
     retry_count: int = 0
+    trigger_author: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dict for backward compatibility."""
@@ -65,6 +67,7 @@ class TriggeredTicket:
             "ticket_url": self.url,
             "auto_merge": self.auto_merge,
             "retry_count": self.retry_count,
+            "trigger_author": self.trigger_author,
         }
 
 
@@ -139,7 +142,7 @@ class TriggerDetector:
         triggered: list[TriggeredTicket] = []
         for issue in issues:
             key = issue.key
-            trigger_type, retry_count = self._get_trigger_type(key)
+            trigger_type, retry_count, trigger_author = self._get_trigger_type(key)
             if trigger_type is None:
                 print(f"[TriggerDetector] {key}: trigger not valid, skipping.")
                 continue
@@ -159,6 +162,7 @@ class TriggerDetector:
                     url=ticket_url,
                     auto_merge=auto_merge,
                     retry_count=retry_count,
+                    trigger_author=trigger_author,
                 )
             )
 
@@ -276,16 +280,53 @@ class TriggerDetector:
     # Internal methods
     # ------------------------------------------------------------------
 
+    def _extract_trigger_author(
+        self,
+        comments: list[JiraComment],
+        trigger_type: str | None,
+    ) -> str:
+        """Extract the author of the trigger comment.
+
+        Returns the author of the last matching trigger comment,
+        or empty string if not found.
+        """
+        if trigger_type is None:
+            return ""
+
+        marker_map = {
+            "do_it": self.config.trigger_comment,
+            "pr_only": self.config.trigger_pr_only,
+            "retry": self.config.trigger_retry,
+        }
+        marker = marker_map.get(trigger_type)
+        if not marker:
+            return ""
+
+        # Find the last comment matching the trigger marker
+        author = ""
+        for c in comments:
+            if marker in c.body:
+                author = c.author or ""
+
+        if not author:
+            print(
+                f"[TriggerDetector] WARNING: could not extract author "
+                f"for trigger_type={trigger_type}"
+            )
+        return author
+
     def _search_triggered_tickets(self) -> list:
         """Search for candidate tickets using JQL."""
         jql = self.build_jql()
         return self.jira.search_issues(jql, fields=["key"], max_results=50)
 
-    def _get_trigger_type(self, issue_key: str) -> tuple[str | None, int]:
+    def _get_trigger_type(self, issue_key: str) -> tuple[str | None, int, str]:
         """Determine which trigger comment is present for an issue.
 
         Returns:
-            Tuple of (trigger_type, retry_count)
+            Tuple of (trigger_type, retry_count, trigger_author)
         """
         comments = self.jira.get_comments(issue_key)
-        return self.parse_trigger_type(comments)
+        trigger_type, retry_count = self.parse_trigger_type(comments)
+        trigger_author = self._extract_trigger_author(comments, trigger_type)
+        return trigger_type, retry_count, trigger_author

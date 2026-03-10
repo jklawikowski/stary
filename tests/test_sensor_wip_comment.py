@@ -17,6 +17,29 @@ class TestFormatWipComment:
         mock_jira = MagicMock()
         return TicketStatusMarker(mock_jira)
 
+    def test_comment_mentions_trigger_author(self):
+        marker = self._make_status_marker()
+        comment = marker.format_wip_comment(trigger_author="john.doe")
+        assert comment.startswith("[~john.doe]")
+        assert "[~sys_qaplatformbot]" not in comment
+
+    def test_comment_mentions_different_trigger_author(self):
+        marker = self._make_status_marker()
+        comment = marker.format_wip_comment(trigger_author="jane.smith")
+        assert comment.startswith("[~jane.smith]")
+        assert "[~sys_qaplatformbot]" not in comment
+
+    def test_comment_falls_back_to_bot_when_trigger_author_empty(self):
+        marker = self._make_status_marker()
+        comment = marker.format_wip_comment(trigger_author="")
+        assert "[~sys_qaplatformbot]" in comment
+
+    def test_comment_falls_back_to_bot_when_trigger_author_none(self):
+        marker = self._make_status_marker()
+        # None is not a valid type hint but test defensive behavior
+        comment = marker.format_wip_comment(trigger_author=None)
+        assert "[~sys_qaplatformbot]" in comment
+
     def test_comment_without_url(self):
         marker = self._make_status_marker()
         comment = marker.format_wip_comment(dagster_run_url=None)
@@ -40,6 +63,7 @@ class TestFormatWipComment:
         assert "View live pipeline status" not in comment
 
     def test_wip_marker_present(self):
+        """Without trigger_author the default wip_marker (bot mention) is present."""
         marker = self._make_status_marker()
         comment = marker.format_wip_comment()
         assert marker.config.wip_marker in comment
@@ -105,3 +129,63 @@ class TestMarkWip:
         # Should not raise
         marker.mark_wip("PROJ-1")
         mock_request.assert_called_once()
+
+    @patch("stary.jira_adapter.requests.Session.request")
+    def test_mark_wip_mentions_trigger_author(self, mock_request: MagicMock):
+        """mark_wip should mention the trigger author in the posted comment."""
+        mock_response = MagicMock(status_code=201, ok=True)
+        mock_response.json.return_value = {"id": "456", "body": "test"}
+        mock_response.raise_for_status = MagicMock()
+        mock_request.return_value = mock_response
+
+        jira = JiraAdapter(
+            base_url="https://jira.example.com",
+            token="fake-token",
+        )
+        marker = TicketStatusMarker(jira)
+        marker.mark_wip("PROJ-1", trigger_author="john.doe")
+
+        mock_request.assert_called_once()
+        call_kwargs = mock_request.call_args
+        body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert "[~john.doe]" in body["body"]
+        assert "[~sys_qaplatformbot]" not in body["body"]
+
+    @patch("stary.jira_adapter.requests.Session.request")
+    def test_mark_wip_mentions_different_author(self, mock_request: MagicMock):
+        """mark_wip with a different trigger author mentions that user."""
+        mock_response = MagicMock(status_code=201, ok=True)
+        mock_response.json.return_value = {"id": "789", "body": "test"}
+        mock_response.raise_for_status = MagicMock()
+        mock_request.return_value = mock_response
+
+        jira = JiraAdapter(
+            base_url="https://jira.example.com",
+            token="fake-token",
+        )
+        marker = TicketStatusMarker(jira)
+        marker.mark_wip("PROJ-2", trigger_author="jane.smith")
+
+        call_kwargs = mock_request.call_args
+        body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert "[~jane.smith]" in body["body"]
+        assert "[~sys_qaplatformbot]" not in body["body"]
+
+    @patch("stary.jira_adapter.requests.Session.request")
+    def test_mark_wip_falls_back_to_bot_when_no_author(self, mock_request: MagicMock):
+        """mark_wip without trigger_author falls back to bot account mention."""
+        mock_response = MagicMock(status_code=201, ok=True)
+        mock_response.json.return_value = {"id": "101", "body": "test"}
+        mock_response.raise_for_status = MagicMock()
+        mock_request.return_value = mock_response
+
+        jira = JiraAdapter(
+            base_url="https://jira.example.com",
+            token="fake-token",
+        )
+        marker = TicketStatusMarker(jira)
+        marker.mark_wip("PROJ-3")
+
+        call_kwargs = mock_request.call_args
+        body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert "[~sys_qaplatformbot]" in body["body"]
