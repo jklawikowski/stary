@@ -42,7 +42,7 @@ class TestDagsterRunUrlFlow:
 
             jira = JiraAdapter(base_url="https://jira.example.com", token="tok")
             marker = TicketStatusMarker(jira)
-            marker.mark_wip("TEST-1", dagster_run_url=dagster_run_url)
+            marker.mark_wip("TEST-1", trigger_author="integration.user", dagster_run_url=dagster_run_url)
 
         call_kwargs = mock_request.call_args
         body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
@@ -62,7 +62,7 @@ class TestDagsterRunUrlFlow:
 
             jira = JiraAdapter(base_url="https://jira.example.com", token="tok")
             marker = TicketStatusMarker(jira)
-            marker.mark_wip("TEST-2", dagster_run_url=dagster_run_url)
+            marker.mark_wip("TEST-2", trigger_author="integration.user", dagster_run_url=dagster_run_url)
 
         call_kwargs = mock_request.call_args
         body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")

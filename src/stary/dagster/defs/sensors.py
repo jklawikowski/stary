@@ -69,6 +69,7 @@ def jira_ticket_sensor() -> Generator:
         ticket_url = ticket.url
         auto_merge = ticket.auto_merge
         retry_count = ticket.retry_count
+        trigger_author = ticket.trigger_author or ""
 
         # Dynamic run_key: includes retry_count to allow Dagster to create
         # new runs for retries (otherwise same run_key would be skipped)
@@ -81,6 +82,7 @@ def jira_ticket_sensor() -> Generator:
                         "ticket_key": ticket_key,
                         "jira_base_url": jira_base_url,
                         "jira_token": jira_token,
+                        "trigger_author": trigger_author,
                     }
                 },
                 "read_jira_ticket": {
@@ -101,6 +103,7 @@ def jira_ticket_sensor() -> Generator:
                         "status": "COMPLETED",
                         "jira_base_url": jira_base_url,
                         "jira_token": jira_token,
+                        "trigger_author": trigger_author,
                     }
                 },
             }
@@ -251,6 +254,13 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
         )
         return
 
+    # Extract trigger_author from run config
+    trigger_author = (
+        ops_config.get("mark_ticket_wip", {})
+        .get("config", {})
+        .get("trigger_author", "")
+    ) or None
+
     # Extract failure details
     failed_step, error_message = _extract_failure_info(context)
 
@@ -274,6 +284,7 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
             failed_step=failed_step,
             error_message=error_message,
             dagster_run_url=dagster_run_url,
+            trigger_author=trigger_author,
         )
         logger.info(
             "Posted failure marker to Jira ticket %s (step: %s)",

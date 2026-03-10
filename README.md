@@ -66,7 +66,7 @@ The URL is constructed as:
 **Example Jira WIP comment (with Dagster link):**
 
 ```
-[~sys_qaplatformbot] stary:wip
+[~trigger_user] stary:wip
 Pipeline has been triggered and is currently in progress.
 [View live pipeline status|https://dagster.example.com/runs/abc12345-def6-7890-ghij-klmnopqrstuv]
 ```
@@ -74,9 +74,13 @@ Pipeline has been triggered and is currently in progress.
 **Example Jira WIP comment (without `DAGSTER_BASE_URL` configured):**
 
 ```
-[~sys_qaplatformbot] stary:wip
+[~trigger_user] stary:wip
 Pipeline has been triggered and is currently in progress.
 ```
+
+The `[~trigger_user]` mention refers to the Jira user who posted the
+triggering comment.  If the trigger author cannot be determined the
+mention is omitted.
 
 If `DAGSTER_BASE_URL` is not set the tool continues to work exactly as
 before — the WIP comment is posted without a pipeline link.  This ensures
