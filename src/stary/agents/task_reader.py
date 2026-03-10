@@ -188,7 +188,7 @@ class TaskReader:
                 system=_SYSTEM_PROMPT,
                 user=user_message,
                 temperature=0.2,
-                timeout=120.0,
+                timeout=900.0,
             )
             print(f"[TaskReader] LLM response: {result}")
 

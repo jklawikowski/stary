@@ -165,6 +165,12 @@ class Planner:
             print("[Planner] Task validation & alignment done.")
             print(validated)
 
+        # 7. Resolve directory paths in target_files to real files ----------
+        resolved_steps = self._resolve_target_files(
+            validated["steps"], repo_tree,
+        )
+        validated["steps"] = resolved_steps
+
         return {
             "steps": validated["steps"],
             "validation_notes": validated.get("validation_notes", ""),
@@ -464,6 +470,10 @@ class Planner:
             "implementer can produce the code without further questions.\n"
             "- `target_files`: list EVERY repo-relative path the step will "
             "read or modify — the implementer reads ONLY these files.\n"
+            "  CRITICAL: every entry in `target_files` MUST be a concrete FILE "
+            "  path that appears in the repository file tree provided below. "
+            "  NEVER use directory paths (e.g. 'src/', 'scripts/'). If a step "
+            "  touches multiple files in a directory, list each file explicitly.\n"
             "- Order steps so earlier steps don't depend on later ones.\n\n"
             "Return ONLY valid JSON (no markdown fences) with this schema:\n"
             "{\n"
@@ -483,6 +493,56 @@ class Planner:
         )
 
         return self._call_llm(system, user, tag="validate")
+
+    # ------------------------------------------------------------------
+    # Post-validation: resolve directory paths → actual files
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_target_files(
+        steps: list[dict],
+        repo_tree: list[str],
+    ) -> list[dict]:
+        """Expand directory prefixes in ``target_files`` to concrete file
+        paths from *repo_tree*.  Entries that already match a file in the
+        tree are kept as-is.  Unknown paths that don't match any file or
+        prefix are dropped with a warning."""
+        tree_set = set(repo_tree)
+
+        for step in steps:
+            raw_targets: list[str] = step.get("target_files", [])
+            resolved: list[str] = []
+            for entry in raw_targets:
+                entry = entry.rstrip("/")
+                if entry in tree_set:
+                    # Exact file match — keep
+                    resolved.append(entry)
+                else:
+                    # Treat as directory prefix and expand
+                    prefix = entry + "/" if not entry.endswith("/") else entry
+                    matched = [f for f in repo_tree if f.startswith(prefix)]
+                    if matched:
+                        print(
+                            f"[Planner] Expanded directory '{entry}/' → "
+                            f"{len(matched)} file(s)"
+                        )
+                        resolved.extend(matched)
+                    else:
+                        print(
+                            f"[Planner] WARNING: target_files entry '{entry}' "
+                            f"matches no file or directory — dropped"
+                        )
+
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for f in resolved:
+                if f not in seen:
+                    seen.add(f)
+                    deduped.append(f)
+            step["target_files"] = deduped
+
+        return steps
 
     # ------------------------------------------------------------------
     # LLM helpers
