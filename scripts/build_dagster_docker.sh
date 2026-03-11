@@ -1,23 +1,21 @@
 #!/bin/bash
-# Build and deploy dagster docker image.
-# Usage: ./scripts/build_dagster_docker.sh
 
 set -e
 
-REPOSITORY=${REPOSITORY:-"stary"}
-PROJECT_NAME=${PROJECT_NAME:-"stary"}
-DOCKER_TAG=${DOCKER_TAG:-"latest"}
+SECRET_ARG=""
+if [[ -n "$NETRC" && -f "$NETRC" ]]; then
+    SECRET_ARG="--secret id=netrc,src=${NETRC}"
+fi
 
-echo "Building dagster webserver image..."
 docker build \
-    -f dagster/dev/dagster/Dockerfile \
-    -t "${PROJECT_NAME}-dagster:${DOCKER_TAG}" \
+    $SECRET_ARG \
+    --build-arg PROJECT_VERSION \
+    --build-arg PIP_PACKAGE_NAME \
+    --build-arg http_proxy=$HTTP_PROXY \
+    --build-arg https_proxy=$HTTPS_PROXY \
+    --build-arg no_proxy=$NO_PROXY \
+    --build-arg PIP_EXTRA_INDEX_URL \
+    --build-arg BASE_IMAGE \
+    -t $DAGSTER_IMAGE_NAME:$DOCKER_TAG \
+    -f dagster/prod/user_deployment/Dockerfile \
     .
-
-echo "Building user deployment image..."
-docker build \
-    -f dagster/dev/user_deployment/Dockerfile \
-    -t "${PROJECT_NAME}:${DOCKER_TAG}" \
-    .
-
-echo "Done."

@@ -80,14 +80,12 @@ def jira_ticket_sensor() -> Generator:
                     "config": {
                         "ticket_key": ticket_key,
                         "jira_base_url": jira_base_url,
-                        "jira_token": jira_token,
                     }
                 },
                 "read_jira_ticket": {
                     "config": {
                         "ticket_url": ticket_url,
                         "jira_base_url": jira_base_url,
-                        "jira_token": jira_token,
                     }
                 },
                 "review_code": {
@@ -100,7 +98,6 @@ def jira_ticket_sensor() -> Generator:
                         "ticket_key": ticket_key,
                         "status": "COMPLETED",
                         "jira_base_url": jira_base_url,
-                        "jira_token": jira_token,
                     }
                 },
             }
@@ -254,13 +251,14 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
     # Extract failure details
     failed_step, error_message = _extract_failure_info(context)
 
-    # Get Jira credentials from run config or environment
+    # Get Jira credentials from environment
     jira_base_url = ops_config.get("mark_ticket_wip", {}).get(
         "config", {}
     ).get("jira_base_url") or os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
-    jira_token = ops_config.get("mark_ticket_wip", {}).get(
-        "config", {}
-    ).get("jira_token") or os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+    if not jira_token:
+        logger.error("Cannot post failure to Jira: JIRA_TOKEN not set in environment")
+        return
 
     # Post failure marker to Jira
     try:

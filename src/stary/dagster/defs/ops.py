@@ -29,7 +29,6 @@ from stary.config import build_dagster_run_url, get_dagster_base_url
     config_schema={
         "ticket_url": str,
         "jira_base_url": str,
-        "jira_token": str,
     },
     ins={"after": In(Nothing)},
     out=Out(Dict),
@@ -39,9 +38,12 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
     from stary.agents import TaskReader
 
     cfg = context.op_config
+    jira_token = os.environ.get("JIRA_TOKEN", "")
+    if not jira_token:
+        raise RuntimeError("JIRA_TOKEN environment variable is not set")
     agent = TaskReader(
         jira_base_url=cfg["jira_base_url"],
-        jira_token=cfg["jira_token"],
+        jira_token=jira_token,
     )
 
     ticket_url = cfg["ticket_url"]
@@ -169,7 +171,6 @@ def review_code(context: OpExecutionContext, pr_url: str) -> Dict[str, Any]:
     config_schema={
         "ticket_key": str,
         "jira_base_url": str,
-        "jira_token": str,
     },
     out=Out(Nothing),
 )
@@ -183,7 +184,10 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
     from stary.ticket_status import TicketStatusMarker
 
     cfg = context.op_config
-    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=cfg["jira_token"])
+    jira_token = os.environ.get("JIRA_TOKEN", "")
+    if not jira_token:
+        raise RuntimeError("JIRA_TOKEN environment variable is not set")
+    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
     status_marker = TicketStatusMarker(jira)
 
     # Build Dagster run URL when possible
@@ -205,7 +209,6 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
         "ticket_key": str,
         "status": str,
         "jira_base_url": str,
-        "jira_token": str,
     },
     ins={"pr_url": In(str), "review_result": In(Dict)},
     out=Out(Nothing),
@@ -216,7 +219,10 @@ def mark_ticket_done(context: OpExecutionContext, pr_url: str, review_result: Di
     from stary.ticket_status import TicketStatusMarker
 
     cfg = context.op_config
-    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=cfg["jira_token"])
+    jira_token = os.environ.get("JIRA_TOKEN", "")
+    if not jira_token:
+        raise RuntimeError("JIRA_TOKEN environment variable is not set")
+    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
     status_marker = TicketStatusMarker(jira)
     status_marker.mark_done(cfg["ticket_key"], pr_url=pr_url, status=cfg["status"])
     context.log.info(

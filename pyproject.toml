@@ -1,38 +1,24 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=68.0", "wheel", "setuptools_scm>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "stary"
-version = "0.1.0"
+authors = [
+    { name="Jakub Klawikowski", email="jakub.klawikowski@intel.com" },
+]
+version = "0.1.1"
 description = "Stary – Software Task Agentic Resolution sYstem"
 readme = "README.md"
 requires-python = ">=3.10"
 
-dependencies = [
-    "dagster>=1.9.0",
-    "dagster-webserver>=1.9.0",
-    "requests>=2.31.0",
-    "github-copilot-sdk",
-]
-
-[project.optional-dependencies]
-dev = [
-    "dagster-webserver",
-    "pytest",
-    "ruff",
+dynamic = [
+    "dependencies"
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["stary*"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements/base.txt"]}

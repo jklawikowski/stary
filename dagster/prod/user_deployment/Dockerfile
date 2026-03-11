@@ -18,26 +18,42 @@ ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 RUN groupadd --gid $USER_GID $USER_NAME \
     && useradd --uid $USER_UID --gid $USER_GID --create-home --shell /bin/bash $USER_NAME
-RUN mkdir /app && chown $USER_UID:$USER_GID /app
+
+# Needed by k8s
+RUN mkdir -p /opt/dagster && chown $USER_UID:$USER_GID /opt/dagster
 
 USER $USER_NAME
 WORKDIR /app
 
 ENV PATH="/home/$USER_NAME/.local/bin:$PATH"
 
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ARG PIP_EXTRA_INDEX_URL="https://af01p-igk.devtools.intel.com/artifactory/api/pypi/qaplatform-igk-local/simple"
+
+RUN --mount=type=cache,mode=0777,uid=$USER_UID,gid=$USER_GID,target=/home/$USER_NAME/.cache/pip \
+    pip3 install --user --upgrade pip==24.3.1
+
+COPY ./requirements/ /requirements/
+RUN --mount=type=cache,uid=$USER_UID,gid=$USER_GID,mode=0777,target=/home/$USER_NAME/.cache/pip \
+    pip3 install -r /requirements/dagster_user_deployment.txt
+
 # Install stary package from built wheel
 ARG PROJECT_VERSION
 ARG PIP_PACKAGE_NAME=stary
-RUN pip3 install --user $PIP_PACKAGE_NAME==$PROJECT_VERSION
+ARG NETRC="/home/$USER_NAME/.netrc"
+RUN --mount=type=secret,id=netrc,uid=$USER_UID,target=/home/$USER_NAME/.netrc \
+    --mount=type=cache,uid=$USER_UID,gid=$USER_GID,mode=0777,target=/home/$USER_NAME/.cache/pip \
+    pip3 install --user $PIP_PACKAGE_NAME==$PROJECT_VERSION
 
-ARG GIT_USER_NAME="Stary Automation"
-ARG GIT_USER_EMAIL="stary-bot@noreply.github.com"
-RUN git config --global user.name "$GIT_USER_NAME" && \
-    git config --global user.email "$GIT_USER_EMAIL"
+# ARG GIT_USER_NAME="Stary Automation"
+# ARG GIT_USER_EMAIL="stary-bot@noreply.github.com"
+# RUN git config --global user.name "$GIT_USER_NAME" && \
+#     git config --global user.email "$GIT_USER_EMAIL"
 
+COPY ./dagster/logging.json .
 EXPOSE 4000
 
 CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4000", "-m", "stary.dagster.definitions"]
 
-HEALTHCHECK --interval=10s --timeout=10s --retries=5 --start-period=30s \
-    CMD ["dagster", "api", "grpc-health-check", "-p", "4000"]
+# HEALTHCHECK --interval=10s --timeout=10s --retries=5 --start-period=30s \
+#     CMD ["dagster", "api", "grpc-health-check", "-p", "4000"]

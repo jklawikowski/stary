@@ -1,0 +1,5 @@
+-r base.txt
+
+dagster-postgres==0.28.3
+dagster-docker==0.28.3
+dagster-k8s==0.28.3
