@@ -2,6 +2,7 @@
 step calling the LLM separately, writes results to the cloned repo, commits,
 pushes the changes to a feature branch, and creates a pull request."""
 
+import difflib
 import json
 import os
 import subprocess
@@ -221,7 +222,7 @@ class Implementer:
     def _step_system_prompt() -> str:
         return (
             "You are an expert software engineer. Your job is to implement "
-            "ONE specific step by producing the FULL content of every "
+            "ONE specific step by producing targeted edits for every "
             "file that needs to be created or modified for this step.\n\n"
             "You have NO tools available. Do NOT attempt to call any functions "
             "or tools. Do NOT browse, search, or read files. Work ONLY with "
@@ -231,16 +232,24 @@ class Implementer:
             "2. Do NOT include any commentary, explanation, markdown fences, "
             "follow-up questions, or conversational text.\n"
             "3. Do NOT ask for more information.\n"
-            "4. For modified files output the COMPLETE file content (not just "
-            "the changed part).\n"
-            "5. Follow the architecture, conventions, and naming from the repo "
+            "4. Follow the architecture, conventions, and naming from the repo "
             "and context docs exactly.\n"
-            "6. Implement the step fully — do not leave TODOs or placeholders.\n\n"
-            "Return ONLY a JSON array (no markdown fences) with this schema:\n"
+            "5. Implement the step fully — do not leave TODOs or placeholders.\n\n"
+            "OUTPUT FORMAT — use one of these schemas per file:\n\n"
+            "For NEW files (action=create): provide full content.\n"
+            '{"path": "<path>", "action": "create", "content": "<full file content>"}\n\n'
+            "For MODIFIED files (action=modify): provide SEARCH/REPLACE edits.\n"
+            "Each edit has a `search` string (exact excerpt from the existing file) "
+            "and a `replace` string (what it should become). Include 2-3 unchanged "
+            "lines of context in `search` to ensure a unique match.\n"
+            '{"path": "<path>", "action": "modify", "edits": ['
+            '{"search": "<exact existing text>", "replace": "<new text>"},'
+            " ...]}\n\n"
+            "For DELETED files (action=delete): path only.\n"
+            '{"path": "<path>", "action": "delete"}\n\n'
+            "Return ONLY a JSON array (no markdown fences):\n"
             "[\n"
-            '  {"path": "<repo-relative path>", '
-            '"action": "create|modify|delete", '
-            '"content": "<full file content>"},\n'
+            '  { ... file op ... },\n'
             "  ...\n"
             "]\n"
         )
@@ -351,6 +360,7 @@ class Implementer:
         parsed = BaseInferenceClient.extract_json_array(raw_text)
         if isinstance(parsed, list) and parsed:
             print(f"[Implementer/{tag}] Full parse: {len(parsed)} file op(s)")
+            self._log_op_summary(tag, parsed)
             return parsed
         if isinstance(parsed, dict):
             for key in ("files", "file_ops", "operations", "changes"):
@@ -369,6 +379,20 @@ class Implementer:
 
         print(f"[Implementer/{tag}] Could not parse any file ops from response")
         return None
+
+    @staticmethod
+    def _log_op_summary(tag: str, ops: list[dict]) -> None:
+        """Print a brief summary of file operations (for debugging)."""
+        for op in ops:
+            action = op.get("action", "modify")
+            path = op.get("path", "?")
+            if action == "modify" and "edits" in op:
+                n = len(op["edits"])
+                print(f"[Implementer/{tag}]   {action} {path} ({n} search/replace edit(s))")
+            elif action == "modify" and "content" in op:
+                print(f"[Implementer/{tag}]   {action} {path} (full-content fallback)")
+            else:
+                print(f"[Implementer/{tag}]   {action} {path}")
 
     # ------------------------------------------------------------------
     # Create pull request
@@ -436,10 +460,12 @@ class Implementer:
     def _write_files(self, file_ops: list[dict]) -> None:
         """Write file operations produced by the LLM to the cloned repo.
 
-        Each entry in *file_ops* must have:
-        - ``path``    : repo-relative file path
-        - ``content`` : full file content
-        - ``action``  : "create" | "modify" | "delete"  (default: "modify")
+        Supports three modes:
+        - ``create``  : write full ``content`` to a new file.
+        - ``modify``  : apply ``edits`` (search/replace pairs) to an
+          existing file. Falls back to full-``content`` overwrite if
+          the LLM returned ``content`` instead of ``edits``.
+        - ``delete``  : remove the file.
         """
         root = Path(self.repo_path)
         for op in file_ops:
@@ -453,10 +479,161 @@ class Implementer:
                     print(f"[Implementer]   deleted {rel}")
                 continue
 
-            # create / modify → write content
-            full.parent.mkdir(parents=True, exist_ok=True)
-            full.write_text(op.get("content", ""))
-            print(f"[Implementer]   wrote   {rel}")
+            if action == "create":
+                full.parent.mkdir(parents=True, exist_ok=True)
+                full.write_text(op.get("content", ""))
+                print(f"[Implementer]   created {rel}")
+                continue
+
+            # action == "modify"
+            edits = op.get("edits")
+            if edits and isinstance(edits, list):
+                # Search/replace mode
+                self._apply_edits(full, rel, edits)
+            elif "content" in op:
+                # Fallback: LLM returned full content despite instructions
+                full.parent.mkdir(parents=True, exist_ok=True)
+                full.write_text(op["content"])
+                print(f"[Implementer]   wrote (full-content fallback) {rel}")
+            else:
+                print(f"[Implementer]   SKIP {rel}: no edits or content")
+
+    # ------------------------------------------------------------------
+    # Apply search/replace edits
+    # ------------------------------------------------------------------
+
+    def _apply_edits(
+        self,
+        full_path: Path,
+        rel_path: str,
+        edits: list[dict],
+    ) -> None:
+        """Apply a list of search/replace edits to *full_path*.
+
+        Each edit dict must have ``search`` and ``replace`` keys.
+        If an exact match is not found, a fuzzy match is attempted
+        using ``difflib.SequenceMatcher``.
+        """
+        try:
+            text = full_path.read_text(errors="replace")
+        except OSError:
+            print(f"[Implementer]   SKIP {rel_path}: file not found for modify")
+            return
+
+        applied = 0
+        for i, edit in enumerate(edits, 1):
+            search = edit.get("search", "")
+            replace = edit.get("replace", "")
+            if not search:
+                print(f"[Implementer]   edit {i}: empty search string, skipping")
+                continue
+
+            if search in text:
+                text = text.replace(search, replace, 1)
+                applied += 1
+            else:
+                # Fuzzy match: try normalised whitespace comparison
+                match_pos = self._fuzzy_find(text, search)
+                if match_pos is not None:
+                    start, end = match_pos
+                    text = text[:start] + replace + text[end:]
+                    applied += 1
+                    print(f"[Implementer]   edit {i}: applied via fuzzy match")
+                else:
+                    print(
+                        f"[Implementer]   edit {i}: search string not found "
+                        f"in {rel_path} ({len(search)} chars)"
+                    )
+
+        full_path.write_text(text)
+        print(f"[Implementer]   modified {rel_path} ({applied}/{len(edits)} edits applied)")
+
+    @staticmethod
+    def _fuzzy_find(
+        text: str,
+        search: str,
+        threshold: float = 0.75,
+    ) -> tuple[int, int] | None:
+        """Find the best fuzzy match for *search* in *text*.
+
+        Uses a sliding window of ``len(search) ± 20%`` and
+        ``difflib.SequenceMatcher`` to score candidates.  Returns
+        ``(start, end)`` indices of the best match above *threshold*,
+        or ``None`` if nothing qualifies.
+        """
+        search_len = len(search)
+        if search_len == 0 or len(text) == 0:
+            return None
+
+        # Normalised-whitespace exact match as fast path
+        norm_search = " ".join(search.split())
+        norm_text = " ".join(text.split())
+        idx = norm_text.find(norm_search)
+        if idx != -1:
+            # Map back to original text positions (approximate)
+            # Walk original text consuming whitespace-collapsed chars
+            orig_pos = 0
+            norm_pos = 0
+            start = 0
+            while norm_pos < idx and orig_pos < len(text):
+                if text[orig_pos].isspace():
+                    # skip extra whitespace in original
+                    while orig_pos < len(text) and text[orig_pos].isspace():
+                        orig_pos += 1
+                    norm_pos += 1  # single space in normalised
+                else:
+                    orig_pos += 1
+                    norm_pos += 1
+            start = orig_pos
+            # Now advance through the matched portion
+            matched_norm = 0
+            while matched_norm < len(norm_search) and orig_pos < len(text):
+                if text[orig_pos].isspace():
+                    while orig_pos < len(text) and text[orig_pos].isspace():
+                        orig_pos += 1
+                    matched_norm += 1
+                else:
+                    orig_pos += 1
+                    matched_norm += 1
+            return (start, orig_pos)
+
+        # Sliding-window SequenceMatcher
+        window_min = max(1, int(search_len * 0.8))
+        window_max = min(len(text), int(search_len * 1.2))
+
+        best_ratio = 0.0
+        best_span: tuple[int, int] | None = None
+
+        # Only check around lines that share content with the search
+        search_lines = set(search.splitlines())
+        text_lines = text.splitlines(keepends=True)
+        candidate_offsets: set[int] = set()
+        offset = 0
+        for tl in text_lines:
+            stripped = tl.strip()
+            if any(stripped and stripped in sl or sl in stripped for sl in search_lines if sl.strip()):
+                candidate_offsets.add(offset)
+            offset += len(tl)
+
+        if not candidate_offsets:
+            return None
+
+        sm = difflib.SequenceMatcher()
+        sm.set_seq2(search)
+
+        for start in candidate_offsets:
+            for wlen in (search_len, window_min, window_max):
+                end = min(start + wlen, len(text))
+                chunk = text[start:end]
+                sm.set_seq1(chunk)
+                ratio = sm.ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_span = (start, end)
+
+        if best_ratio >= threshold and best_span is not None:
+            return best_span
+        return None
 
     # ------------------------------------------------------------------
     # Commit & push
