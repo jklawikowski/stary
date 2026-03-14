@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --upgrade pip
 
-COPY requirements/dagster.txt /requirements/dagster.txt
+COPY requirements/ /requirements/
 RUN pip3 install -r /requirements/dagster.txt
 
 ENV DAGSTER_HOME=/opt/dagster/dagster_home/
