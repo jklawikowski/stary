@@ -1,59 +1,54 @@
-"""TaskReader – Reads a Jira ticket by URL (or from a legacy XML file),
-interprets the description via LLM, and prepares a structured prompt with
-task descriptions for downstream agents."""
+"""TaskReader – Reads a Jira ticket via tool-calling, interprets the
+description via LLM, and prepares a structured prompt with task
+descriptions for downstream agents.
 
-import json
+The LLM uses tools to fetch ticket data from Jira and can browse
+related tickets or comments for additional context."""
+
+from __future__ import annotations
+
 import os
-import re
-import xml.etree.ElementTree as ET
 
-from stary.inference import InferenceClient, get_inference_client
+from stary.agents.tools import make_jira_tools
+from stary.inference import InferenceClient, ToolDefinition, get_inference_client
 from stary.jira_adapter import JiraAdapter
 
 JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com")
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
 
-# System prompt that instructs the LLM how to analyse a Jira ticket.
 _SYSTEM_PROMPT = """\
 You are an expert software architect and Jira ticket analyst.
-You will receive a Jira ticket consisting of a summary and a free-form
-description.  Your job is to autonomously decompose the ticket into a
-complete set of concrete, actionable implementation tasks.  Do NOT expect
-pre-defined sub-tasks — YOU must infer every task from the description.
 
-CRITICAL RULES — you MUST follow all of these:
-- Do NOT use any tools or function calls. You have no tools available.
-- Do NOT attempt to browse, search, read files, or gather additional data.
-- Do NOT converse, ask questions, or produce any text outside the JSON.
-- Work ONLY with the information provided in the user message.
-- Your ENTIRE response must be a single, valid JSON object — nothing else.
+You have tools available to fetch Jira ticket data. Use them to gather
+all information you need about the ticket before producing your analysis.
 
-Follow these steps:
-1. Understand the intent, scope, and acceptance criteria of the ticket.
-2. Identify every piece of work required: new files, functions, tests,
-   configuration changes, documentation, etc.
-3. For each task provide:
-   - "title": a short imperative title (e.g. "Create login endpoint").
-   - "detail": a thorough technical description of what needs to be done,
-     including API contracts, data models, edge cases, and acceptance
-     criteria.
-4. Return ONLY valid JSON with the following schema (no markdown fences,
-   no commentary, no prose — ONLY the JSON object):
+Your workflow:
+1. Use the fetch_ticket tool to get the ticket's summary and description.
+2. Optionally use get_comments to see any discussion or clarifications.
+3. Optionally use search_issues to find related tickets for context.
+4. Analyse the ticket and decompose it into concrete implementation tasks.
+
+CRITICAL RULES:
+- Do NOT produce your final JSON until you have fetched the ticket data.
+- Your FINAL response must be a single, valid JSON object — nothing else.
+- Do NOT include markdown fences, commentary, or prose in your final answer.
+
+Your final JSON must follow this schema:
 {
   "interpretation": "<one-paragraph summary of what the ticket asks for>",
   "tasks": [
     {"title": "<task title>", "detail": "<detailed technical description>"},
     ...
   ],
-  "implementer_prompt": "<a full prompt that another AI agent can use to implement all the tasks above; be specific and include all technical details>"
+  "implementer_prompt": "<a full prompt that another AI agent can use to implement all tasks; be specific and include all technical details>"
 }
 """
 
 
 class TaskReader:
-    """Fetches a Jira ticket by URL, sends its description to an LLM for
-    interpretation, and produces a structured task list + implementer prompt
-    for the next agent in the pipeline."""
+    """Fetches a Jira ticket using tool-calling, sends its description to
+    an LLM for interpretation, and produces a structured task list for the
+    next agent in the pipeline."""
 
     def __init__(
         self,
@@ -65,16 +60,10 @@ class TaskReader:
         self._inference = inference_client or get_inference_client()
         self.jira_base_url = jira_base_url or JIRA_BASE_URL
         self.jira_token = jira_token or JIRA_TOKEN
-
-        # Use provided adapter or create one
         self._jira = jira_adapter or JiraAdapter(
             base_url=self.jira_base_url,
             token=self.jira_token,
         )
-
-    # ------------------------------------------------------------------
-    # public API
-    # ------------------------------------------------------------------
 
     def run(self, ticket_input: str) -> dict:
         """Interpret a ticket and return structured input for downstream agents.
@@ -82,7 +71,6 @@ class TaskReader:
         Args:
             ticket_input: A Jira ticket URL
                 (e.g. ``https://jira.devtools.intel.com/browse/PROJ-123``)
-                **or** a path to a legacy XML file.
 
         Returns:
             {
@@ -95,24 +83,43 @@ class TaskReader:
                 "implementer_prompt": str,
             }
         """
-        # 1. Obtain ticket fields -------------------------------------------
-        if ticket_input.startswith("http"):
-            ticket_id, summary, description = self._fetch_from_jira(ticket_input)
-            ticket_url = ticket_input
-        else:
-            # Legacy XML path
-            ticket_id, summary, description = self._parse_xml(ticket_input)
-            ticket_url = ""
-        print(f"[TaskReader] Parsed ticket {ticket_id}")
+        issue_key = JiraAdapter.extract_issue_key(ticket_input)
+        print(f"[TaskReader] Processing ticket {issue_key}")
 
-        # 2. Call LLM to interpret description and generate tasks ------------
-        llm_output = self._interpret_with_llm(ticket_id, summary, description)
-        print(llm_output)
+        # Build tools for Jira access
+        tools = make_jira_tools(self._jira)
 
-        # 3. Assemble result -------------------------------------------------
+        user_message = (
+            f"Analyse Jira ticket **{issue_key}**.\n\n"
+            f"Start by fetching the ticket with the fetch_ticket tool "
+            f"(issue_key: {issue_key}), then decompose it into concrete "
+            f"implementation tasks."
+        )
+
+        try:
+            llm_output = self._inference.chat_json_with_tools(
+                system=_SYSTEM_PROMPT,
+                user=user_message,
+                tools=tools,
+                temperature=0.2,
+                timeout=900.0,
+            )
+        except Exception as exc:
+            print(f"[TaskReader] LLM failed: {exc}")
+            llm_output = {}
+
+        # Fetch ticket data directly as fallback for metadata
+        try:
+            issue = self._jira.get_issue(issue_key, fields=["summary", "description"])
+            summary = issue.summary
+            description = issue.description
+        except Exception:
+            summary = llm_output.get("interpretation", issue_key)
+            description = ""
+
         result = {
-            "ticket_id": ticket_id,
-            "ticket_url": ticket_url,
+            "ticket_id": issue_key,
+            "ticket_url": ticket_input if ticket_input.startswith("http") else "",
             "summary": summary,
             "description": description,
             "interpretation": llm_output.get("interpretation", ""),
@@ -120,91 +127,13 @@ class TaskReader:
             "implementer_prompt": llm_output.get("implementer_prompt", ""),
         }
 
-        print(f"[TaskReader] LLM produced {len(result['tasks'])} task(s) for ticket {ticket_id}.")
-        return result
-
-    # ------------------------------------------------------------------
-    # Jira REST API
-    # ------------------------------------------------------------------
-
-    def _fetch_from_jira(self, ticket_url: str) -> tuple[str, str, str]:
-        """Fetch ticket data from Jira REST API given a browse URL.
-
-        Extracts the issue key from the URL and calls the Jira API
-        to retrieve summary and description.
-
-        Returns (ticket_id, summary, description).
-        """
-        # URL form: https://jira.devtools.intel.com/browse/PROJ-123
-        issue_key = JiraAdapter.extract_issue_key(ticket_url)
-
-        print(f"[TaskReader] Fetching ticket {issue_key} from Jira …")
-        issue = self._jira.get_issue(issue_key, fields=["summary", "description"])
-
-        return issue.key, issue.summary, issue.description
-
-    # ------------------------------------------------------------------
-    # Legacy XML parsing
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_xml(xml_path: str):
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-
-        ticket_id = root.findtext("id", default="UNKNOWN")
-        summary = root.findtext("summary", default="")
-        description = root.findtext("description", default="")
-
-        return ticket_id, summary, description
-
-    # ------------------------------------------------------------------
-    # LLM interaction
-    # ------------------------------------------------------------------
-
-    def _interpret_with_llm(
-        self,
-        ticket_id: str,
-        summary: str,
-        description: str,
-    ) -> dict:
-        """Send the ticket info to the LLM and return parsed JSON.
-
-        The LLM is responsible for breaking the ticket down into concrete
-        implementation tasks — no pre-defined tasks are provided."""
-
-        user_message = (
-            f"Jira Ticket: {ticket_id}\n"
-            f"Summary: {summary}\n\n"
-            f"Description:\n{description}\n\n"
-            "Analyse the ticket, break it down into concrete implementation "
-            "tasks, and return the JSON as instructed."
-        )
-
-        print(f"[TaskReader] Calling inference for ticket interpretation…")
-
-        try:
-            result = self._inference.chat_json(
-                system=_SYSTEM_PROMPT,
-                user=user_message,
-                temperature=0.2,
-                timeout=900.0,
+        if not result["tasks"]:
+            print("[TaskReader] WARNING: No tasks produced, using fallback.")
+            result["tasks"] = [{"title": summary, "detail": description}]
+            result["implementer_prompt"] = (
+                f"Implement the following based on this Jira ticket.\n"
+                f"Summary: {summary}\nDescription: {description}\n"
             )
-            print(f"[TaskReader] LLM response: {result}")
 
-            if not result:
-                print("[TaskReader] LLM returned empty response.")
-                raise ValueError("LLM returned empty response.")
-
-            return result
-
-        except Exception as exc:
-            print(f"[TaskReader] Failed to get LLM response: {exc}")
-            return {
-                "interpretation": description,
-                "tasks": [{"title": summary, "detail": description}],
-                "implementer_prompt": (
-                    f"Implement the following based on this Jira ticket.\n"
-                    f"Summary: {summary}\nDescription: {description}\n"
-                ),
-            }
+        print(f"[TaskReader] Produced {len(result['tasks'])} task(s) for {issue_key}.")
+        return result

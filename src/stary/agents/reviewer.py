@@ -1,74 +1,74 @@
-"""Reviewer – acts as a senior architect performing an in-depth code review
-on a GitHub pull request.  Uses the GitHub API to fetch the PR diff and
-repository context (markdown docs, source files) without cloning the repo
-locally.  Sends everything to an LLM for structured review, then posts the
-review back to the PR via the GitHub API (APPROVE or REQUEST_CHANGES with
-inline comments)."""
+"""Reviewer -- senior architect code review on a GitHub pull request,
+powered by tool-calling.
 
-import base64
-import json
+The LLM uses tools to fetch the PR diff, explore repo files, and read
+context. It produces a structured review which is then posted back
+to the PR via the GitHub API.
+"""
+
+from __future__ import annotations
+
 import os
 import re
-from collections import Counter
-from typing import Any
-from urllib.parse import urlparse
 
 import requests
 
+from stary.agents.tools import make_github_review_tools
 from stary.inference import InferenceClient, get_inference_client
 
-# File extensions considered relevant source code for context
-_SOURCE_EXTENSIONS = (
-    ".py", ".ts", ".js", ".yaml", ".yml", ".json", ".toml", ".cfg",
-    ".ini", ".sh", ".bash", ".dockerfile",
-)
-
-# Files given higher priority when gathering context
-_PRIORITY_NAMES = (
-    "__init__.py", "setup.py", "setup.cfg", "pyproject.toml", "readme.md",
-)
-
-# Directories to skip when walking the repo tree from the API
-_IGNORED_DIRS = {
-    ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
-    ".eggs",
-}
-
-_CONTEXT_MD_PATTERN = re.compile(r"\.md$", re.IGNORECASE)
-
-# ---------------------------------------------------------------------------
-# Prompt budget constants
-# ---------------------------------------------------------------------------
-_MAX_PROMPT_CHARS = 200_000
-_TREE_BUDGET      = 30_000
-_CONTEXT_BUDGET   = 40_000
-_SOURCE_BUDGET    = 80_000
-
-_LOW_PRIORITY_MD = re.compile(
-    r"(changelog|changes|history|migration|release|license|licence|authors"
-    r"|contributors|code.of.conduct)",
-    re.IGNORECASE,
-)
-
-# Regex to parse a GitHub PR URL
 _PR_URL_RE = re.compile(
     r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
 )
 
+_REVIEW_SYSTEM_PROMPT = """\
+You are a senior software architect performing a thorough code review
+on a GitHub pull request.
+
+You have tools to:
+- get_pr_diff: Get the unified diff for the PR being reviewed.
+- get_pr_info: Get PR metadata (title, author, body, stats).
+- get_pr_changed_files: List all changed files with their status.
+- list_repo_files: List all files in the repository.
+- read_repo_file: Read a file from the repository (default branch).
+
+Your workflow:
+1. Start by getting the PR diff and PR info.
+2. Examine the changed files list.
+3. Read relevant existing files from the repo for context (architecture
+   docs, related source files, tests).
+4. Produce your review.
+
+Your responsibilities:
+- Architecture alignment: verify changes follow project conventions.
+- Correctness: look for logic errors, wrong types, missing error handling.
+- Security: flag eval(), exec(), unsafe deserialization, injection vectors.
+- Code quality: identify TODO/FIXME stubs, dead code, style violations.
+- Completeness: check all required changes are present (imports, tests, etc.).
+
+When you are done reviewing, provide your FINAL answer as ONLY valid JSON
+(no markdown fences) with this schema:
+{
+  "approved": true/false,
+  "summary": "<one-paragraph overall assessment>",
+  "comments": [
+    {
+      "severity": "critical" | "warning" | "suggestion",
+      "file": "<affected file path or 'general'>",
+      "comment": "<detailed description>"
+    }
+  ]
+}
+
+Rules:
+- approved must be FALSE if there are any critical comments.
+- approved may be TRUE with only warning/suggestion comments.
+- Be specific: reference file names, function names, and line context.
+- Do NOT invent issues not evidenced in the diff or repo.
+"""
+
 
 class Reviewer:
-    """Senior-architect code reviewer using the GitHub API.
-
-    Pipeline
-    --------
-    1. Parse the PR URL to extract owner, repo, and PR number.
-    2. Fetch the unified diff via the GitHub API.
-    3. Fetch the repo file tree (default branch) via the GitHub API.
-    4. Read markdown context docs and key source files via the API.
-    5. Send everything to the LLM for review.
-    6. Post the review back to the PR (APPROVE / REQUEST_CHANGES).
-    """
+    """Senior-architect code reviewer using tool-calling and the GitHub API."""
 
     def __init__(
         self,
@@ -78,411 +78,101 @@ class Reviewer:
         self._inference = inference_client or get_inference_client()
         self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
         if not self.github_token:
-            raise ValueError(
-                "GITHUB_TOKEN must be set (env var or constructor arg)."
-            )
+            raise ValueError("GITHUB_TOKEN must be set (env var or constructor arg).")
         self._gh_headers = {
             "Authorization": f"token {self.github_token}",
             "Accept": "application/vnd.github.v3+json",
         }
 
-    # ------------------------------------------------------------------
-    # public API
-    # ------------------------------------------------------------------
-
     def run(self, pr_url: str, auto_merge: bool = True) -> dict:
-        """
-        End-to-end review pipeline.
+        """End-to-end review pipeline.
 
-        Parameters
-        ----------
-        pr_url : str
-            Full GitHub pull request URL, e.g.
-            ``https://github.com/owner/repo/pull/123``
-        auto_merge : bool, default True
-            If True and the review is approved, the PR will be merged.
-            If False, the PR is left open even when approved.
-
-        Returns
-        -------
-        dict
-            {
-                "approved": bool,
-                "comments": [...],
-                "summary": str,
-                "stats": {"additions": int, "deletions": int, "files": int},
-                "github_review_url": str | None,
-            }
+        Returns dict with approved, comments, summary, stats, merged.
         """
-        # 0. Parse PR URL --------------------------------------------------
         owner, repo, pr_number = self._parse_pr_url(pr_url)
         print(f"[Reviewer] Reviewing PR #{pr_number} on {owner}/{repo}")
 
-        # 1. Fetch unified diff --------------------------------------------
-        diff = self._fetch_pr_diff(owner, repo, pr_number)
-        print(f"[Reviewer] Fetched diff ({len(diff)} chars).")
-
-        # 2. Fetch repo tree (default branch) ------------------------------
-        repo_tree = self._fetch_repo_tree(owner, repo)
-        print(f"[Reviewer] Repo tree – {len(repo_tree)} file(s) found.")
-
-        # 3. Read markdown context docs ------------------------------------
-        context_docs = self._fetch_context_markdowns(owner, repo, repo_tree)
-        print(f"[Reviewer] Found {len(context_docs)} markdown context doc(s).")
-
-        # 4. Read key source files -----------------------------------------
-        source_snippets = self._fetch_key_sources(owner, repo, repo_tree)
-
-        # 5. Compute basic diff stats --------------------------------------
-        stats = self._compute_diff_stats(diff)
-        print(
-            f"[Reviewer] Diff stats – {stats['additions']} addition(s), "
-            f"{stats['deletions']} deletion(s), {stats['files']} file(s)."
+        # Build tools for this PR
+        tools = make_github_review_tools(
+            self.github_token, owner, repo, pr_number,
         )
 
-        # 6. Call LLM for the actual review --------------------------------
-        review = self._review_via_llm(
-            diff, repo_tree, context_docs, source_snippets,
-        )
+        # Run LLM with tools
+        print("[Reviewer] Starting tool-calling review session...")
+        try:
+            review = self._inference.chat_json_with_tools(
+                system=_REVIEW_SYSTEM_PROMPT,
+                user=(
+                    f"Review pull request #{pr_number} on {owner}/{repo}.\n"
+                    f"PR URL: {pr_url}\n\n"
+                    "Start by fetching the PR diff and info, then explore "
+                    "the repo for context before producing your review."
+                ),
+                tools=tools,
+                temperature=0.2,
+                timeout=900.0,
+                max_iterations=20,
+            )
+        except Exception as exc:
+            print(f"[Reviewer] LLM failed: {exc}")
+            review = {}
 
-        # Ensure top-level keys are always present -------------------------
+        # Ensure defaults
         review.setdefault("approved", False)
         review.setdefault("comments", [])
         review.setdefault("summary", "")
+
+        # Compute diff stats
+        stats = self._compute_diff_stats(owner, repo, pr_number)
         review["stats"] = stats
 
         status = "APPROVED" if review["approved"] else (
             f"CHANGES REQUESTED ({len(review['comments'])} comment(s))"
         )
-        print(f"[Reviewer] Review verdict: {status}")
+        print(f"[Reviewer] Verdict: {status}")
         print(f"[Reviewer] Summary: {review['summary']}")
-        for i, c in enumerate(review["comments"], 1):
-            sev = c.get("severity", "info").upper()
-            fpath = c.get("file", "general")
-            print(f"[Reviewer]   #{i} [{sev}] {fpath}: {c.get('comment', '')}")
 
-        # 7. Post review comments to GitHub --------------------------------
-        comment_url = self._post_pr_comment(
-            owner, repo, pr_number, review,
-        )
+        # Post review to GitHub
+        comment_url = self._post_pr_comment(owner, repo, pr_number, review)
         review["github_comment_url"] = comment_url
 
-        # 8. Rebase & merge if approved ------------------------------------
+        # Merge if approved
         review["merged"] = False
         if review["approved"] and auto_merge:
-            merged = self._merge_pr(owner, repo, pr_number)
-            review["merged"] = merged
+            review["merged"] = self._merge_pr(owner, repo, pr_number)
         elif review["approved"] and not auto_merge:
             print("[Reviewer] PR approved but auto_merge=False, skipping merge.")
 
-        print(f"[Reviewer] Review complete: {status}")
         return review
-
-    # ------------------------------------------------------------------
-    # 0. Parse PR URL
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _parse_pr_url(pr_url: str) -> tuple[str, str, int]:
-        """Extract (owner, repo, pr_number) from a GitHub PR URL."""
         m = _PR_URL_RE.search(pr_url)
         if not m:
             raise ValueError(
-                f"Invalid GitHub PR URL: {pr_url!r}.  "
-                "Expected format: https://github.com/OWNER/REPO/pull/NUMBER"
+                f"Invalid GitHub PR URL: {pr_url!r}. "
+                "Expected: https://github.com/OWNER/REPO/pull/NUMBER"
             )
         return m.group("owner"), m.group("repo"), int(m.group("number"))
 
-    # ------------------------------------------------------------------
-    # 1. Fetch PR diff via GitHub API
-    # ------------------------------------------------------------------
-
-    def _fetch_pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
-        """Download the unified diff for the pull request."""
+    def _compute_diff_stats(self, owner: str, repo: str, pr_number: int) -> dict:
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
-        headers = {
-            **self._gh_headers,
-            "Accept": "application/vnd.github.v3.diff",
-        }
-        print(f"[Reviewer] GET {url} (diff)")
-        resp = requests.get(url, headers=headers, timeout=60)
-        resp.raise_for_status()
-        return resp.text
-
-    # ------------------------------------------------------------------
-    # 2. Fetch repo file tree (default branch, recursive)
-    # ------------------------------------------------------------------
-
-    def _fetch_repo_tree(self, owner: str, repo: str) -> list[str]:
-        """Return a sorted list of repo-relative file paths via the Git
-        Trees API (recursive)."""
-        # First, get the default branch SHA
-        repo_url = f"https://api.github.com/repos/{owner}/{repo}"
-        resp = requests.get(repo_url, headers=self._gh_headers, timeout=30)
-        resp.raise_for_status()
-        default_branch = resp.json().get("default_branch", "main")
-
-        tree_url = (
-            f"https://api.github.com/repos/{owner}/{repo}"
-            f"/git/trees/{default_branch}?recursive=1"
-        )
-        print(f"[Reviewer] GET {tree_url}")
-        resp = requests.get(tree_url, headers=self._gh_headers, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-
-        paths: list[str] = []
-        for item in data.get("tree", []):
-            if item.get("type") != "blob":
-                continue
-            path = item["path"]
-            # skip ignored directories
-            parts = path.split("/")
-            if any(p in _IGNORED_DIRS for p in parts):
-                continue
-            paths.append(path)
-        return sorted(paths)
-
-    # ------------------------------------------------------------------
-    # 3. Fetch markdown context files via GitHub API
-    # ------------------------------------------------------------------
-
-    def _fetch_context_markdowns(
-        self,
-        owner: str,
-        repo: str,
-        repo_tree: list[str],
-    ) -> dict[str, str]:
-        """Fetch markdown docs within a character budget.
-
-        Prioritises root-level and architecture docs over deeply nested
-        or auto-generated files.
-        """
-        md_paths = [r for r in repo_tree if _CONTEXT_MD_PATTERN.search(r)]
-
-        def _sort_key(p: str) -> tuple:
-            depth = p.count("/")
-            is_low = 1 if _LOW_PRIORITY_MD.search(p) else 0
-            return (is_low, depth, p)
-
-        md_paths.sort(key=_sort_key)
-
-        docs: dict[str, str] = {}
-        total = 0
-        for rel in md_paths:
-            content = self._fetch_file_content(owner, repo, rel)
-            if content is None:
-                continue
-            if total + len(content) > _CONTEXT_BUDGET:
-                remaining = _CONTEXT_BUDGET - total
-                if remaining > 200:
-                    docs[rel] = content[:remaining] + "\n... (truncated)"
-                    total = _CONTEXT_BUDGET
-                break
-            docs[rel] = content
-            total += len(content)
-        return docs
-
-    # ------------------------------------------------------------------
-    # 4. Fetch key source files
-    # ------------------------------------------------------------------
-
-    def _fetch_key_sources(
-        self,
-        owner: str,
-        repo: str,
-        repo_tree: list[str],
-        max_files: int = 30,
-        max_bytes: int = 80_000,
-    ) -> dict[str, str]:
-        """Fetch relevant source files so the LLM has real code context."""
-        priority: list[str] = []
-        rest: list[str] = []
-
-        for rel in repo_tree:
-            lower = rel.lower()
-            basename = lower.rsplit("/", 1)[-1]
-            if basename in _PRIORITY_NAMES:
-                priority.append(rel)
-            elif lower.endswith(_SOURCE_EXTENSIONS):
-                rest.append(rel)
-
-        candidates = priority + rest
-        snippets: dict[str, str] = {}
-        total = 0
-        for rel in candidates[:max_files]:
-            text = self._fetch_file_content(owner, repo, rel)
-            if text is None:
-                continue
-            if total + len(text) > max_bytes:
-                text = text[: max_bytes - total] + "\n... (truncated)"
-            snippets[rel] = text
-            total += len(text)
-            if total >= max_bytes:
-                break
-
-        print(f"[Reviewer] Fetched {len(snippets)} source file(s) ({total} bytes).")
-        return snippets
-
-    # ------------------------------------------------------------------
-    # GitHub file content helper
-    # ------------------------------------------------------------------
-
-    def _fetch_file_content(
-        self, owner: str, repo: str, path: str
-    ) -> str | None:
-        """Fetch a single file's contents from the repo (default branch)."""
-        url = (
-            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-        )
         try:
             resp = requests.get(url, headers=self._gh_headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            if data.get("encoding") == "base64":
-                return base64.b64decode(data["content"]).decode(
-                    "utf-8", errors="replace"
-                )
-            # Fallback: download_url
-            dl = data.get("download_url")
-            if dl:
-                return requests.get(dl, timeout=30).text
-        except Exception as exc:
-            print(f"[Reviewer] Could not fetch {path}: {exc}")
-        return None
+            return {
+                "additions": data.get("additions", 0),
+                "deletions": data.get("deletions", 0),
+                "files": data.get("changed_files", 0),
+            }
+        except Exception:
+            return {"additions": 0, "deletions": 0, "files": 0}
 
-    # ------------------------------------------------------------------
-    # 5. Diff stats (computed locally, not by the LLM)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _compute_diff_stats(diff: str) -> dict:
-        additions = sum(
-            1 for line in diff.splitlines()
-            if line.startswith("+") and not line.startswith("+++")
-        )
-        deletions = sum(
-            1 for line in diff.splitlines()
-            if line.startswith("-") and not line.startswith("---")
-        )
-        files = diff.count("+++ b/") + diff.count("+++ /dev/null")
-        files = max(files, diff.count("--- a/") + diff.count("--- /dev/null"))
-        return {"additions": additions, "deletions": deletions, "files": files}
-
-    # ------------------------------------------------------------------
-    # 6. LLM-powered review
-    # ------------------------------------------------------------------
-
-    def _review_via_llm(
-        self,
-        diff: str,
-        repo_tree: list[str],
-        context_docs: dict[str, str],
-        source_snippets: dict[str, str],
-    ) -> dict:
-        """Send the diff together with repo context to the LLM for review."""
-
-        tree_str = self._build_tree_string(repo_tree)
-        context_block = self._cap_block(context_docs, _CONTEXT_BUDGET)
-        source_block = self._cap_block(
-            {p: f"```\n{c}\n```" for p, c in source_snippets.items()},
-            _SOURCE_BUDGET,
-        )
-
-        system = (
-            "You are a senior software architect performing a thorough code "
-            "review on a unified diff.\n\n"
-            "You are provided with:\n"
-            "1. The unified diff to review.\n"
-            "2. The repository file tree.\n"
-            "3. Architecture / convention markdown documents from the repo "
-            "(these are the source of truth for naming, structure, patterns).\n"
-            "4. Key existing source files from the repository.\n\n"
-            "Your responsibilities:\n"
-            "- **Architecture alignment**: verify the diff does not break the "
-            "established project architecture or violate conventions defined "
-            "in the markdown documents.\n"
-            "- **Correctness**: look for logic errors, off-by-one mistakes, "
-            "wrong return types, missing error handling, race conditions, or "
-            "any code that would malfunction at runtime.\n"
-            "- **Security**: flag uses of eval(), exec(), unsafe deserialization, "
-            "SQL injection vectors, or secrets in code.\n"
-            "- **Code quality**: identify TODO/FIXME placeholders, "
-            "NotImplementedError stubs, dead code, missing docstrings on "
-            "public APIs, or violations of project style.\n"
-            "- **Completeness**: check that all required changes are present "
-            "(e.g. exports, imports, test coverage) and nothing is left "
-            "half-implemented.\n\n"
-            "For EVERY concern, produce a comment with a severity level.\n\n"
-            "Finally, decide whether this diff is safe to merge.\n\n"
-            "Return ONLY valid JSON (no markdown fences) with this schema:\n"
-            "{\n"
-            '  "approved": true/false,\n'
-            '  "summary": "<one-paragraph overall assessment>",\n'
-            '  "comments": [\n'
-            "    {\n"
-            '      "severity": "critical" | "warning" | "suggestion",\n'
-            '      "file": "<affected file path or \'general\'>",\n'
-            '      "comment": "<detailed description of the concern>"\n'
-            "    }\n"
-            "  ]\n"
-            "}\n\n"
-            "Rules:\n"
-            "- `approved` must be FALSE if there are any `critical` comments.\n"
-            "- `approved` may be TRUE if there are only `warning` or "
-            "`suggestion` comments and none are blocking.\n"
-            "- Be specific: reference file names, function names, and line "
-            "context from the diff.\n"
-            "- Do NOT invent issues that are not evidenced in the diff or "
-            "repo context.\n"
-        )
-
-        user = (
-            f"## Unified diff to review\n```diff\n{diff}\n```\n\n"
-            f"## Repository file tree\n```\n{tree_str}\n```\n\n"
-            f"## Architecture & convention documents\n"
-            f"{context_block or '(none found)'}\n\n"
-            f"## Existing source code\n{source_block or '(none)'}\n\n"
-            "Perform your review now."
-        )
-
-        prompt_size = len(system) + len(user)
-        print(f"[Reviewer/review] Prompt size: {prompt_size} chars")
-
-        if prompt_size > _MAX_PROMPT_CHARS:
-            overshoot = prompt_size - _MAX_PROMPT_CHARS
-            print(
-                f"[Reviewer/review] WARNING: prompt exceeds budget by "
-                f"{overshoot} chars. Trimming."
-            )
-            user = user[: len(user) - overshoot - 100] + (
-                "\n\n... (context trimmed to fit model limits)\n\n"
-                "Perform your review now."
-            )
-
-        return self._call_llm(system, user, tag="review")
-
-    # ------------------------------------------------------------------
-    # 7. Post review comments to GitHub
-    # ------------------------------------------------------------------
-
-    def _post_pr_comment(
-        self,
-        owner: str,
-        repo: str,
-        pr_number: int,
-        review: dict,
-    ) -> str | None:
-        """Post the review as a PR comment (issue comment).
-
-        All review feedback (verdict, summary, individual comments) is
-        rendered as a single formatted comment on the pull request.
-        """
-        verdict = "APPROVED ✅" if review.get("approved") else "CHANGES REQUESTED ❌"
-
-        # Build a nicely formatted comment body
-        body_parts: list[str] = []
-        body_parts.append("## Reviewer – Automated Code Review\n")
+    def _post_pr_comment(self, owner: str, repo: str, pr_number: int, review: dict) -> str | None:
+        verdict = "APPROVED \u2705" if review.get("approved") else "CHANGES REQUESTED \u274c"
+        body_parts = []
+        body_parts.append("## Reviewer -- Automated Code Review\n")
         body_parts.append(f"**Verdict:** {verdict}\n")
         if review.get("summary"):
             body_parts.append(f"**Summary:** {review['summary']}\n")
@@ -500,145 +190,36 @@ class Reviewer:
             body_parts.append("### Comments\n")
             for i, c in enumerate(comments, 1):
                 sev = c.get("severity", "info")
-                icon = {"critical": "🔴", "warning": "🟡", "suggestion": "🔵"}.get(
-                    sev, "⚪"
-                )
+                icon = {"critical": "\U0001f534", "warning": "\U0001f7e1", "suggestion": "\U0001f535"}.get(sev, "\u26aa")
                 fpath = c.get("file", "general")
                 body_parts.append(
-                    f"{i}. {icon} **[{sev.upper()}]** `{fpath}` — "
+                    f"{i}. {icon} **[{sev.upper()}]** `{fpath}` -- "
                     f"{c.get('comment', '')}\n"
                 )
 
-        if review.get("approved"):
-            body_parts.append("\n---\n\n🚀 **Auto-merging via rebase.**\n")
-
         body = "\n".join(body_parts)
 
-        url = (
-            f"https://api.github.com/repos/{owner}/{repo}"
-            f"/issues/{pr_number}/comments"
-        )
-        print(f"[Reviewer] POST {url}  (review comment)")
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
         try:
-            resp = requests.post(
-                url, json={"body": body},
+            resp = requests.post(url, json={"body": body}, headers=self._gh_headers, timeout=60)
+            resp.raise_for_status()
+            comment_url = resp.json().get("html_url")
+            print(f"[Reviewer] Review posted: {comment_url}")
+            return comment_url
+        except requests.RequestException as exc:
+            print(f"[Reviewer] Failed to post comment: {exc}")
+            return None
+
+    def _merge_pr(self, owner: str, repo: str, pr_number: int) -> bool:
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge"
+        try:
+            resp = requests.put(
+                url, json={"merge_method": "rebase"},
                 headers=self._gh_headers, timeout=60,
             )
             resp.raise_for_status()
-            comment_url = resp.json().get("html_url")
-            print(f"[Reviewer] PR comment posted: {comment_url}")
-            return comment_url
-        except requests.RequestException as exc:
-            print(f"[Reviewer] Failed to post PR comment: {exc}")
-            if hasattr(exc, "response") and exc.response is not None:
-                print(f"[Reviewer] Response body: {exc.response.text}")
-            return None
-
-    # ------------------------------------------------------------------
-    # 8. Merge PR via rebase
-    # ------------------------------------------------------------------
-
-    def _merge_pr(
-        self, owner: str, repo: str, pr_number: int
-    ) -> bool:
-        """Merge the PR using the rebase strategy.
-
-        Returns True if the merge succeeded, False otherwise.
-        """
-        url = (
-            f"https://api.github.com/repos/{owner}/{repo}"
-            f"/pulls/{pr_number}/merge"
-        )
-        payload = {"merge_method": "rebase"}
-        print(f"[Reviewer] PUT {url}  merge_method=rebase")
-        try:
-            resp = requests.put(
-                url, json=payload, headers=self._gh_headers, timeout=60,
-            )
-            resp.raise_for_status()
-            msg = resp.json().get("message", "")
-            print(f"[Reviewer] PR #{pr_number} merged successfully: {msg}")
+            print(f"[Reviewer] PR #{pr_number} merged.")
             return True
         except requests.RequestException as exc:
-            print(f"[Reviewer] Failed to merge PR #{pr_number}: {exc}")
-            if hasattr(exc, "response") and exc.response is not None:
-                print(f"[Reviewer] Response body: {exc.response.text}")
+            print(f"[Reviewer] Merge failed: {exc}")
             return False
-
-    # ------------------------------------------------------------------
-    # LLM helpers
-    # ------------------------------------------------------------------
-
-    def _call_llm(
-        self,
-        system: str,
-        user: str,
-        *,
-        tag: str = "",
-        temperature: float = 0.2,
-    ) -> dict:
-        """Send a chat-completion request via inference client and parse the JSON response."""
-        label = f"[Reviewer/{tag}]" if tag else "[Reviewer]"
-        print(f"{label} Calling inference…")
-
-        try:
-            result = self._inference.chat_json(
-                system=system,
-                user=user,
-                temperature=temperature,
-                timeout=300.0,
-            )
-            print(f"{label} Got JSON response")
-            return result if result else {"approved": False, "comments": [], "summary": "Empty response"}
-
-        except Exception as exc:
-            print(f"{label} LLM request failed: {exc}")
-            return {"approved": False, "comments": [], "summary": f"LLM request failed: {exc}"}
-
-    # ------------------------------------------------------------------
-    # Prompt-building helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_tree_string(
-        repo_tree: list[str], budget: int = _TREE_BUDGET
-    ) -> str:
-        """Build a repo tree string that fits within *budget* characters."""
-        full = "\n".join(repo_tree)
-        if len(full) <= budget:
-            return full
-
-        dir_counts: Counter[str] = Counter()
-        for p in repo_tree:
-            parts = p.split("/")
-            key = "/".join(parts[:min(3, len(parts) - 1)]) + "/" if len(parts) > 1 else "(root)"
-            dir_counts[key] += 1
-
-        lines: list[str] = []
-        total_chars = 0
-        for d, cnt in dir_counts.most_common():
-            line = f"{d}  ({cnt} file{'s' if cnt != 1 else ''})"
-            if total_chars + len(line) + 1 > budget:
-                lines.append(f"... ({len(dir_counts) - len(lines)} more directories)")
-                break
-            lines.append(line)
-            total_chars += len(line) + 1
-        return "\n".join(sorted(lines))
-
-    @staticmethod
-    def _cap_block(
-        docs: dict[str, str], budget: int
-    ) -> str:
-        """Build a formatted context string capped to *budget* characters."""
-        parts: list[str] = []
-        total = 0
-        for path, content in docs.items():
-            block = f"### {path}\n{content}"
-            if total + len(block) > budget:
-                remaining = budget - total
-                if remaining > 200:
-                    parts.append(block[:remaining] + "\n... (truncated)")
-                break
-            parts.append(block)
-            total += len(block)
-        return "\n\n".join(parts)

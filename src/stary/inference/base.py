@@ -3,20 +3,80 @@
 This module defines the InferenceClient protocol that all inference
 backends must implement. Agents depend ONLY on this interface.
 
+Includes tool-calling support: agents define ``ToolDefinition`` objects
+with handler callbacks, and the inference client manages the multi-turn
+tool-call loop automatically.
+
 To add a new inference backend:
 1. Create a new module in stary/inference/ (e.g., openai.py)
 2. Implement a class that satisfies the InferenceClient protocol
 3. Register it in the factory (stary/inference/factory.py)
-
-The interface is intentionally minimal to make implementation easy
-while covering all agent needs.
 """
+
+from __future__ import annotations
 
 import json
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol, runtime_checkable
 
+
+# ---------------------------------------------------------------------------
+# Tool-calling data types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ToolParam:
+    """Single parameter for a tool."""
+    name: str
+    type: str
+    description: str
+    required: bool = True
+    enum: list[str] | None = None
+
+
+@dataclass
+class ToolDefinition:
+    """Definition of a tool the LLM can call.
+
+    ``handler`` is invoked by the inference client when the LLM
+    requests this tool.  It receives keyword arguments matching
+    ``parameters`` and must return a string result.
+    """
+    name: str
+    description: str
+    parameters: list[ToolParam]
+    handler: Callable[..., str]
+
+    def to_openai_schema(self) -> dict:
+        """Convert to OpenAI-style function-calling tool schema."""
+        props: dict[str, dict] = {}
+        required: list[str] = []
+        for p in self.parameters:
+            prop: dict[str, Any] = {"type": p.type, "description": p.description}
+            if p.enum:
+                prop["enum"] = p.enum
+            props[p.name] = prop
+            if p.required:
+                required.append(p.name)
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": required,
+                },
+            },
+        }
+
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
 
 @runtime_checkable
 class InferenceClient(Protocol):
@@ -33,17 +93,7 @@ class InferenceClient(Protocol):
         temperature: float = 0.2,
         timeout: float = 300.0,
     ) -> str:
-        """Send a chat completion request.
-
-        Args:
-            system: System prompt defining the assistant's behavior
-            user: User message/prompt
-            temperature: Sampling temperature (0.0-1.0), lower = more deterministic
-            timeout: Request timeout in seconds
-
-        Returns:
-            The assistant's response as a string
-        """
+        """Send a chat completion request and return the text response."""
         ...
 
     def chat_json(
@@ -53,19 +103,39 @@ class InferenceClient(Protocol):
         temperature: float = 0.2,
         timeout: float = 300.0,
     ) -> dict:
-        """Send a chat completion request and parse JSON response.
+        """Send a chat completion request and parse the JSON response."""
+        ...
 
-        A JSON-enforcement suffix is appended to the system prompt.
+    def chat_with_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        temperature: float = 0.2,
+        timeout: float = 900.0,
+        max_iterations: int = 30,
+    ) -> str:
+        """Run a multi-turn tool-calling loop.
 
-        Args:
-            system: System prompt (should instruct LLM to return JSON)
-            user: User message/prompt
-            temperature: Sampling temperature (0.0-1.0)
-            timeout: Request timeout in seconds
+        The LLM may call any of the supplied *tools*.  The inference
+        client executes the tool handler and feeds the result back,
+        repeating until the LLM produces a final text response (no
+        more tool calls) or *max_iterations* is reached.
 
-        Returns:
-            Parsed JSON dict from the response, or empty dict on parse failure
+        Returns the LLM's final text response.
         """
+        ...
+
+    def chat_json_with_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        temperature: float = 0.2,
+        timeout: float = 900.0,
+        max_iterations: int = 30,
+    ) -> dict:
+        """Like ``chat_with_tools`` but parses the final response as JSON."""
         ...
 
 
@@ -73,7 +143,8 @@ class BaseInferenceClient(ABC):
     """Abstract base class with shared utilities for inference clients.
 
     Concrete implementations can inherit from this to get common
-    JSON parsing logic. They only need to implement `chat()`.
+    JSON parsing and tool-calling logic.  They only need to implement
+    ``chat()``.
     """
 
     @abstractmethod
@@ -94,11 +165,7 @@ class BaseInferenceClient(ABC):
         temperature: float = 0.2,
         timeout: float = 300.0,
     ) -> dict:
-        """Send a chat completion request and parse JSON response.
-
-        Appends a JSON-enforcement suffix to the system prompt so the
-        model is more likely to return raw JSON.
-        """
+        """Send a chat completion request and parse JSON response."""
         _JSON_ENFORCE = (
             "\n\nYou MUST respond with ONLY a valid JSON object — no markdown "
             "fences, no commentary, no prose. Just the raw JSON."
@@ -106,9 +173,144 @@ class BaseInferenceClient(ABC):
         content = self.chat(system + _JSON_ENFORCE, user, temperature, timeout)
         return self._parse_json_response(content)
 
+    # ------------------------------------------------------------------
+    # Tool-calling (default prompt-based implementation)
+    # ------------------------------------------------------------------
+
+    _TOOL_CALL_TAG = "tool_call"
+
+    def chat_with_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        temperature: float = 0.2,
+        timeout: float = 900.0,
+        max_iterations: int = 30,
+    ) -> str:
+        """Multi-turn tool-calling loop (prompt-based fallback).
+
+        Subclasses that have native tool-calling support (e.g. via an
+        SDK) should override this for better reliability and efficiency.
+        """
+        tool_map = {t.name: t for t in tools}
+        tools_desc = self._format_tools_for_prompt(tools)
+
+        augmented_system = (
+            system + "\n\n"
+            "## Available Tools\n"
+            "You have the following tools available. To call a tool, "
+            "include a fenced block in your response using EXACTLY this "
+            "format (you may include multiple blocks):\n\n"
+            f"```{self._TOOL_CALL_TAG}\n"
+            '{"tool": "<tool_name>", "arguments": {<args as JSON>}}\n'
+            "```\n\n"
+            "After each tool call you will receive the result and can "
+            "continue working. When you have finished, provide your "
+            f"FINAL answer WITHOUT any ```{self._TOOL_CALL_TAG}``` blocks.\n\n"
+            + tools_desc
+        )
+
+        conversation = user
+
+        for iteration in range(max_iterations):
+            response = self.chat(augmented_system, conversation, temperature, timeout)
+
+            calls = self._extract_tool_calls_from_text(response)
+            if not calls:
+                return response  # final answer
+
+            # Execute tool calls and append results
+            results_parts: list[str] = []
+            for tc_name, tc_args in calls:
+                tool = tool_map.get(tc_name)
+                if tool:
+                    try:
+                        result = tool.handler(**tc_args)
+                    except Exception as exc:
+                        result = f"Error executing tool '{tc_name}': {exc}"
+                else:
+                    result = f"Unknown tool: '{tc_name}'"
+                results_parts.append(
+                    f"## Tool result: {tc_name}\n{result}"
+                )
+
+            conversation += (
+                f"\n\n--- Assistant ---\n{response}\n\n"
+                f"--- Tool Results ---\n"
+                + "\n\n".join(results_parts)
+                + "\n\nContinue with your task. You may call more tools "
+                "or provide your final answer."
+            )
+
+            print(
+                f"[InferenceClient] Tool iteration {iteration + 1}: "
+                f"{len(calls)} call(s) executed"
+            )
+
+        # Exhausted iterations — return last response
+        return response  # type: ignore[possibly-undefined]
+
+    def chat_json_with_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        temperature: float = 0.2,
+        timeout: float = 900.0,
+        max_iterations: int = 30,
+    ) -> dict:
+        """Like ``chat_with_tools`` but parses the final response as JSON."""
+        _JSON_ENFORCE = (
+            "\n\nWhen you provide your FINAL answer (no more tool calls), "
+            "respond with ONLY valid JSON — no markdown fences, no "
+            "commentary, no prose. Just the raw JSON object."
+        )
+        response = self.chat_with_tools(
+            system + _JSON_ENFORCE, user, tools,
+            temperature, timeout, max_iterations,
+        )
+        return self._parse_json_response(response)
+
+    # ------------------------------------------------------------------
+    # Tool-call helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_tools_for_prompt(tools: list[ToolDefinition]) -> str:
+        """Render tool definitions as a human-readable description."""
+        parts: list[str] = []
+        for t in tools:
+            params = ", ".join(
+                f"{p.name}: {p.type}"
+                + ("" if p.required else " (optional)")
+                for p in t.parameters
+            )
+            parts.append(f"- **{t.name}**({params}): {t.description}")
+        return "\n".join(parts)
+
+    @classmethod
+    def _extract_tool_calls_from_text(
+        cls, text: str,
+    ) -> list[tuple[str, dict]]:
+        """Extract tool call blocks from LLM response text."""
+        pattern = rf"```{cls._TOOL_CALL_TAG}\s*\n(.*?)\n```"
+        calls: list[tuple[str, dict]] = []
+        for match in re.finditer(pattern, text, re.DOTALL):
+            try:
+                data = json.loads(match.group(1))
+                name = data.get("tool", "")
+                args = data.get("arguments", {})
+                if name:
+                    calls.append((name, args))
+            except json.JSONDecodeError:
+                continue
+        return calls
+
     @staticmethod
     def _parse_json_response(content: str) -> dict:
-        """Parse JSON from LLM response, handling markdown fences."""
+        """Parse JSON from LLM response, handling markdown fences and
+        surrounding prose."""
         if not content:
             return {}
 
@@ -129,10 +331,47 @@ class BaseInferenceClient(ABC):
 
         try:
             return json.loads(content)
-        except json.JSONDecodeError as exc:
-            print(f"[InferenceClient] Failed to parse JSON: {exc}")
-            print(f"[InferenceClient] Raw content: {content[:500]}...")
-            return {}
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: find the outermost { ... } in the text (handles
+        # LLM responses that include prose before/after the JSON object).
+        start = content.find("{")
+        if start != -1:
+            depth = 0
+            in_string = False
+            escape = False
+            end = -1
+            for i in range(start, len(content)):
+                ch = content[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end != -1:
+                candidate = content[start:end + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+
+        print(f"[InferenceClient] Failed to parse JSON from response")
+        print(f"[InferenceClient] Raw content: {content[:500]}...")
+        return {}
 
     @staticmethod
     def extract_json_array(text: str) -> Any:
