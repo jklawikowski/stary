@@ -10,15 +10,14 @@ import logging
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_read_tools, make_shell_tools, make_write_tools
+from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
 
 _STEP_SYSTEM_PROMPT = """\
@@ -86,14 +85,10 @@ class Implementer:
     def __init__(
         self,
         inference_client: InferenceClient | None = None,
-        github_token: str | None = None,
-        git_user_name: str | None = None,
-        git_user_email: str | None = None,
+        github: GitHubAdapter | None = None,
     ):
         self._inference = inference_client or get_inference_client()
-        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
-        self.git_user_name = git_user_name or os.environ.get("GIT_USER_NAME", "qaplatformbot")
-        self.git_user_email = git_user_email or os.environ.get("GIT_USER_EMAIL", "sys_qaplatformbot@intel.com")
+        self._github = github or GitHubAdapter()
         self.repo_path: str | None = None
 
     def run(self, planner_output: dict) -> str:
@@ -171,46 +166,20 @@ class Implementer:
         self, repo_url: str, branch_name: str, ticket_id: str,
         summary: str, base_branch: str = "master",
     ) -> str:
-        if not self.github_token:
-            raise EnvironmentError("[Implementer] github_token is required to create a PR.")
-
-        url_clean = repo_url.rstrip("/")
-        if url_clean.endswith(".git"):
-            url_clean = url_clean[:-4]
-        parsed = urlparse(url_clean)
-        parts = parsed.path.strip("/").split("/")
-        if len(parts) < 2:
-            raise ValueError(f"[Implementer] Cannot extract owner/repo from: {repo_url}")
-        owner, repo = parts[0], parts[1]
-
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
-        headers = {
-            "Authorization": f"token {self.github_token}",
-            "Accept": "application/vnd.github+json",
-        }
-        body = {
-            "title": f"{ticket_id} {summary}",
-            "head": branch_name,
-            "base": base_branch,
-            "body": (
+        owner, repo = GitHubAdapter.parse_repo_url(repo_url)
+        pr = self._github.create_pull_request(
+            owner=owner,
+            repo=repo,
+            title=f"{ticket_id} {summary}",
+            head=branch_name,
+            base=base_branch,
+            body=(
                 f"Automated implementation for **{ticket_id}**.\n\n"
                 f"**Summary:** {summary}\n\n"
                 f"Branch: `{branch_name}`"
             ),
-        }
-
-        last_exc: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                resp = requests.post(api_url, json=body, headers=headers, timeout=60)
-                resp.raise_for_status()
-                return resp.json()["html_url"]
-            except (requests.ConnectionError, requests.Timeout) as exc:
-                last_exc = exc
-                logger.error("PR creation attempt %d/3 failed: %s", attempt, exc)
-                if attempt < 3:
-                    time.sleep(2 ** attempt)
-        raise RuntimeError(f"[Implementer] Failed to create PR after 3 attempts: {last_exc}")
+        )
+        return pr.html_url
 
     # ------------------------------------------------------------------
     # Linter auto-fix
@@ -353,36 +322,9 @@ class Implementer:
     # ------------------------------------------------------------------
 
     def _commit_and_push(self, commit_msg: str, branch_name: str, repo_url: str) -> str:
-        run = lambda cmd: subprocess.run(
-            cmd, cwd=self.repo_path, check=True, capture_output=True, text=True,
+        return self._github.commit_and_push(
+            repo_path=self.repo_path,
+            repo_url=repo_url,
+            branch_name=branch_name,
+            commit_msg=commit_msg,
         )
-
-        run(["git", "config", "user.name", self.git_user_name])
-        run(["git", "config", "user.email", self.git_user_email])
-        run(["git", "add", "-A"])
-
-        # Check if there are staged changes before committing
-        status = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=self.repo_path, capture_output=True,
-        )
-        if status.returncode == 0:
-            raise RuntimeError(
-                "[Implementer] No files were changed by the implementation steps. "
-                "Nothing to commit."
-            )
-
-        run(["git", "commit", "-m", commit_msg])
-
-        if self.github_token and "github.com" in repo_url:
-            auth_url = repo_url.replace(
-                "https://github.com", f"https://{self.github_token}@github.com",
-            )
-            run(["git", "push", auth_url, branch_name])
-        else:
-            run(["git", "push", "origin", branch_name])
-
-        base = repo_url.rstrip("/")
-        if base.endswith(".git"):
-            base = base[:-4]
-        return f"{base}/tree/{branch_name}"

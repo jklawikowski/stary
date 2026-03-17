@@ -7,7 +7,7 @@ name = "stary"
 authors = [
     { name="Jakub Klawikowski", email="jakub.klawikowski@intel.com" },
 ]
-version = "0.1.1"
+version = "0.2.1"
 description = "Stary – Software Task Agentic Resolution sYstem"
 readme = "README.md"
 requires-python = ">=3.10"

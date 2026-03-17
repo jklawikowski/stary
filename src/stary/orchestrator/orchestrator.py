@@ -11,6 +11,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 from stary.agents import TaskReader, Planner, Implementer, Reviewer
+from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
 from stary.sensor import TriggerConfig, TriggerDetector
@@ -40,30 +41,33 @@ class Orchestrator:
             token=jira_token,
         )
 
+        # Create shared GitHubAdapter
+        self._github = GitHubAdapter(
+            token=github_token,
+            git_user_name=git_user_name,
+            git_user_email=git_user_email,
+        )
+
         # Create trigger detector and status marker
         self._trigger_detector = TriggerDetector(self._jira)
         self._status_marker = TicketStatusMarker(self._jira)
 
-        # Create agents with shared inference client
+        # Create agents with shared inference client and adapters
         self.task_reader = TaskReader(
             inference_client=self._inference,
             jira_adapter=self._jira,
         )
         self.planner = Planner(
             inference_client=self._inference,
-            github_token=github_token,
-            git_user_name=git_user_name,
-            git_user_email=git_user_email,
+            github=self._github,
         )
         self.implementer = Implementer(
             inference_client=self._inference,
-            github_token=github_token,
-            git_user_name=git_user_name,
-            git_user_email=git_user_email,
+            github=self._github,
         )
         self.reviewer = Reviewer(
             inference_client=self._inference,
-            github_token=github_token,
+            github=self._github,
         )
         self.poll_interval = poll_interval or POLL_INTERVAL
 

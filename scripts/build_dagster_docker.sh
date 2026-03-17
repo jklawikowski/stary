@@ -8,7 +8,7 @@ if [[ -n "$NETRC" && -f "$NETRC" ]]; then
 fi
 
 docker build \
-    $SECRET_ARG \
+    --secret id=netrc,src=${NETRC} \
     --build-arg PROJECT_VERSION \
     --build-arg PIP_PACKAGE_NAME \
     --build-arg http_proxy=$HTTP_PROXY \

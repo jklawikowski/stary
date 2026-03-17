@@ -14,15 +14,13 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_read_tools
+from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, ToolDefinition, ToolParam, get_inference_client
 
 PLAYGROUND_DIR = Path.home() / "playground"
@@ -139,14 +137,10 @@ class Planner:
     def __init__(
         self,
         inference_client: InferenceClient | None = None,
-        github_token: str | None = None,
-        git_user_name: str | None = None,
-        git_user_email: str | None = None,
+        github: GitHubAdapter | None = None,
     ):
         self._inference = inference_client or get_inference_client()
-        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
-        self.git_user_name = git_user_name or os.environ.get("GIT_USER_NAME", "qaplatformbot")
-        self.git_user_email = git_user_email or os.environ.get("GIT_USER_EMAIL", "sys_qaplatformbot@intel.com")
+        self._github = github or GitHubAdapter()
         self.repo_path: str | None = None
 
     # ------------------------------------------------------------------
@@ -271,29 +265,12 @@ class Planner:
     # ------------------------------------------------------------------
 
     def _clone_repo(self, repo_url: str) -> str:
+        from urllib.parse import urlparse
+
         parsed = urlparse(repo_url)
         repo_name = Path(parsed.path).stem
         dest = PLAYGROUND_DIR / repo_name
-
-        if dest.exists():
-            logger.info("Removing existing clone at %s", dest)
-            shutil.rmtree(dest)
-
-        PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)
-
-        if self.github_token and "github.com" in repo_url:
-            auth_url = repo_url.replace(
-                "https://github.com",
-                f"https://{self.github_token}@github.com",
-            )
-        else:
-            auth_url = repo_url
-
-        subprocess.run(
-            ["git", "clone", auth_url, str(dest)],
-            check=True, capture_output=True, text=True,
-        )
-        return str(dest)
+        return self._github.clone_repo(repo_url, dest)
 
     # ------------------------------------------------------------------
     # Branch management
@@ -302,9 +279,4 @@ class Planner:
     def _create_branch(self, ticket_id: str) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         branch_name = f"dev/sys_qaplatformbot/{ticket_id}{ts}"
-        subprocess.run(
-            ["git", "checkout", "-b", branch_name],
-            cwd=self.repo_path,
-            check=True, capture_output=True, text=True,
-        )
-        return branch_name
+        return self._github.create_branch(self.repo_path, branch_name)

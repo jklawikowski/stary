@@ -8,16 +8,12 @@ Security: all filesystem tools validate paths stay within the repo root.
 
 from __future__ import annotations
 
-import base64
 import fnmatch
 import logging
 import os
 import re
 import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
-
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -426,91 +422,60 @@ def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
 # ---------------------------------------------------------------------------
 
 def make_github_review_tools(
-    github_token: str,
+    github,
     owner: str,
     repo: str,
     pr_number: int,
 ) -> list[ToolDefinition]:
-    """Tools for reviewing a GitHub pull request."""
+    """Tools for reviewing a GitHub pull request.
 
-    headers = {
-        "Authorization": f"token {github_token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
+    Args:
+        github: GitHubAdapter instance
+        owner: Repository owner
+        repo: Repository name
+        pr_number: Pull request number
+    """
 
     def get_pr_diff() -> str:
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
-        diff_headers = {**headers, "Accept": "application/vnd.github.v3.diff"}
-        resp = requests.get(url, headers=diff_headers, timeout=60)
-        resp.raise_for_status()
-        return resp.text
+        return github.get_pr_diff(owner, repo, pr_number)
 
     def get_pr_info() -> str:
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        pr = github.get_pull_request(owner, repo, pr_number)
         return (
-            f"Title: {data.get('title', '')}\n"
-            f"Author: {data.get('user', {}).get('login', '')}\n"
-            f"Base: {data.get('base', {}).get('ref', '')}\n"
-            f"Head: {data.get('head', {}).get('ref', '')}\n"
-            f"Body:\n{data.get('body', '')}\n"
-            f"Additions: {data.get('additions', 0)}\n"
-            f"Deletions: {data.get('deletions', 0)}\n"
-            f"Changed files: {data.get('changed_files', 0)}"
+            f"Title: {pr.title}\n"
+            f"Author: {pr.author}\n"
+            f"Base: {pr.base_ref}\n"
+            f"Head: {pr.head_ref}\n"
+            f"Body:\n{pr.body}\n"
+            f"Additions: {pr.additions}\n"
+            f"Deletions: {pr.deletions}\n"
+            f"Changed files: {pr.changed_files}"
         )
 
     def list_repo_files() -> str:
-        repo_url = f"https://api.github.com/repos/{owner}/{repo}"
-        resp = requests.get(repo_url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        default_branch = resp.json().get("default_branch", "main")
-
-        tree_url = (
-            f"https://api.github.com/repos/{owner}/{repo}"
-            f"/git/trees/{default_branch}?recursive=1"
-        )
-        resp = requests.get(tree_url, headers=headers, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-
-        paths: list[str] = []
-        for item in data.get("tree", []):
-            if item.get("type") != "blob":
-                continue
-            path = item["path"]
+        default_branch = github.get_repo_default_branch(owner, repo)
+        paths = github.get_repo_tree(owner, repo, default_branch)
+        filtered: list[str] = []
+        for path in paths:
             parts = path.split("/")
             if any(p in _IGNORED_DIRS or p.endswith(".egg-info") for p in parts):
                 continue
-            paths.append(path)
-        return "\n".join(sorted(paths))
+            filtered.append(path)
+        return "\n".join(sorted(filtered))
 
     def read_repo_file(path: str) -> str:
-        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
         try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("encoding") == "base64":
-                return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-            dl = data.get("download_url")
-            if dl:
-                return requests.get(dl, timeout=30).text
+            return github.get_file_contents(owner, repo, path)
         except Exception as exc:
             return f"Error fetching '{path}': {exc}"
-        return f"Could not read '{path}'."
 
     def get_pr_changed_files() -> str:
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        files = resp.json()
+        files = github.get_pr_files(owner, repo, pr_number)
         parts: list[str] = []
         for f in files:
             parts.append(
-                f"{f.get('status', '?')} {f.get('filename', '?')} "
-                f"(+{f.get('additions', 0)} -{f.get('deletions', 0)})"
+                f"{f.status} {f.filename} "
+                f"(+{f.additions} -{f.deletions})"
             )
         return "\n".join(parts) if parts else "No changed files."
 

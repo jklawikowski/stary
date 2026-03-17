@@ -10,18 +10,12 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-
-import requests
 
 logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_github_review_tools
+from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
-
-_PR_URL_RE = re.compile(
-    r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
-)
 
 _REVIEW_SYSTEM_PROMPT = """\
 You are a senior software architect performing a thorough code review
@@ -76,28 +70,24 @@ class Reviewer:
     def __init__(
         self,
         inference_client: InferenceClient | None = None,
-        github_token: str | None = None,
+        github: GitHubAdapter | None = None,
     ):
         self._inference = inference_client or get_inference_client()
-        self.github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
-        if not self.github_token:
+        self._github = github or GitHubAdapter()
+        if not self._github.token:
             raise ValueError("GITHUB_TOKEN must be set (env var or constructor arg).")
-        self._gh_headers = {
-            "Authorization": f"token {self.github_token}",
-            "Accept": "application/vnd.github.v3+json",
-        }
 
     def run(self, pr_url: str, auto_merge: bool = True) -> dict:
         """End-to-end review pipeline.
 
         Returns dict with approved, comments, summary, stats, merged.
         """
-        owner, repo, pr_number = self._parse_pr_url(pr_url)
+        owner, repo, pr_number = GitHubAdapter.parse_pr_url(pr_url)
         logger.info("Reviewing PR #%d on %s/%s", pr_number, owner, repo)
 
         # Build tools for this PR
         tools = make_github_review_tools(
-            self.github_token, owner, repo, pr_number,
+            self._github, owner, repo, pr_number,
         )
 
         # Run LLM with tools
@@ -142,32 +132,19 @@ class Reviewer:
         # Merge if approved
         review["merged"] = False
         if review["approved"] and auto_merge:
-            review["merged"] = self._merge_pr(owner, repo, pr_number)
+            review["merged"] = self._github.merge_pull_request(owner, repo, pr_number)
         elif review["approved"] and not auto_merge:
             logger.info("PR approved but auto_merge=False, skipping merge")
 
         return review
 
-    @staticmethod
-    def _parse_pr_url(pr_url: str) -> tuple[str, str, int]:
-        m = _PR_URL_RE.search(pr_url)
-        if not m:
-            raise ValueError(
-                f"Invalid GitHub PR URL: {pr_url!r}. "
-                "Expected: https://github.com/OWNER/REPO/pull/NUMBER"
-            )
-        return m.group("owner"), m.group("repo"), int(m.group("number"))
-
     def _compute_diff_stats(self, owner: str, repo: str, pr_number: int) -> dict:
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
         try:
-            resp = requests.get(url, headers=self._gh_headers, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
+            pr = self._github.get_pull_request(owner, repo, pr_number)
             return {
-                "additions": data.get("additions", 0),
-                "deletions": data.get("deletions", 0),
-                "files": data.get("changed_files", 0),
+                "additions": pr.additions,
+                "deletions": pr.deletions,
+                "files": pr.changed_files,
             }
         except Exception:
             return {"additions": 0, "deletions": 0, "files": 0}
@@ -201,28 +178,5 @@ class Reviewer:
                 )
 
         body = "\n".join(body_parts)
+        return self._github.post_issue_comment(owner, repo, pr_number, body)
 
-        url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
-        try:
-            resp = requests.post(url, json={"body": body}, headers=self._gh_headers, timeout=60)
-            resp.raise_for_status()
-            comment_url = resp.json().get("html_url")
-            logger.info("Review posted: %s", comment_url)
-            return comment_url
-        except requests.RequestException as exc:
-            logger.error("Failed to post comment: %s", exc)
-            return None
-
-    def _merge_pr(self, owner: str, repo: str, pr_number: int) -> bool:
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge"
-        try:
-            resp = requests.put(
-                url, json={"merge_method": "rebase"},
-                headers=self._gh_headers, timeout=60,
-            )
-            resp.raise_for_status()
-            logger.info("PR #%d merged", pr_number)
-            return True
-        except requests.RequestException as exc:
-            logger.error("Merge failed: %s", exc)
-            return False
