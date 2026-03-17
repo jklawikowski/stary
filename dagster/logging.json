@@ -10,12 +10,12 @@
     "console": {
       "class": "logging.StreamHandler",
       "formatter": "default",
-      "stream": "ext://sys.stdout"
+      "stream": "ext://sys.stderr"
     }
   },
   "root": {
     "handlers": ["console"],
-    "level": "INFO"
+    "level": "WARNING"
   },
   "loggers": {
     "stary": {

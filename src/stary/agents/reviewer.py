@@ -8,10 +8,13 @@ to the PR via the GitHub API.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_github_review_tools
 from stary.inference import InferenceClient, get_inference_client
@@ -90,7 +93,7 @@ class Reviewer:
         Returns dict with approved, comments, summary, stats, merged.
         """
         owner, repo, pr_number = self._parse_pr_url(pr_url)
-        print(f"[Reviewer] Reviewing PR #{pr_number} on {owner}/{repo}")
+        logger.info("Reviewing PR #%d on %s/%s", pr_number, owner, repo)
 
         # Build tools for this PR
         tools = make_github_review_tools(
@@ -98,7 +101,7 @@ class Reviewer:
         )
 
         # Run LLM with tools
-        print("[Reviewer] Starting tool-calling review session...")
+        logger.info("Starting tool-calling review session")
         try:
             review = self._inference.chat_json_with_tools(
                 system=_REVIEW_SYSTEM_PROMPT,
@@ -114,7 +117,7 @@ class Reviewer:
                 max_iterations=20,
             )
         except Exception as exc:
-            print(f"[Reviewer] LLM failed: {exc}")
+            logger.error("LLM failed: %s", exc)
             review = {}
 
         # Ensure defaults
@@ -129,8 +132,8 @@ class Reviewer:
         status = "APPROVED" if review["approved"] else (
             f"CHANGES REQUESTED ({len(review['comments'])} comment(s))"
         )
-        print(f"[Reviewer] Verdict: {status}")
-        print(f"[Reviewer] Summary: {review['summary']}")
+        logger.info("Verdict: %s", status)
+        logger.info("Summary: %s", review["summary"])
 
         # Post review to GitHub
         comment_url = self._post_pr_comment(owner, repo, pr_number, review)
@@ -141,7 +144,7 @@ class Reviewer:
         if review["approved"] and auto_merge:
             review["merged"] = self._merge_pr(owner, repo, pr_number)
         elif review["approved"] and not auto_merge:
-            print("[Reviewer] PR approved but auto_merge=False, skipping merge.")
+            logger.info("PR approved but auto_merge=False, skipping merge")
 
         return review
 
@@ -204,10 +207,10 @@ class Reviewer:
             resp = requests.post(url, json={"body": body}, headers=self._gh_headers, timeout=60)
             resp.raise_for_status()
             comment_url = resp.json().get("html_url")
-            print(f"[Reviewer] Review posted: {comment_url}")
+            logger.info("Review posted: %s", comment_url)
             return comment_url
         except requests.RequestException as exc:
-            print(f"[Reviewer] Failed to post comment: {exc}")
+            logger.error("Failed to post comment: %s", exc)
             return None
 
     def _merge_pr(self, owner: str, repo: str, pr_number: int) -> bool:
@@ -218,8 +221,8 @@ class Reviewer:
                 headers=self._gh_headers, timeout=60,
             )
             resp.raise_for_status()
-            print(f"[Reviewer] PR #{pr_number} merged.")
+            logger.info("PR #%d merged", pr_number)
             return True
         except requests.RequestException as exc:
-            print(f"[Reviewer] Merge failed: {exc}")
+            logger.error("Merge failed: %s", exc)
             return False

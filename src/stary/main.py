@@ -20,12 +20,41 @@ Environment variables:
     GITHUB_TOKEN: GitHub token for PR operations
 """
 
+import logging
+import logging.config
+import json
 import sys
 import os
+from pathlib import Path
 from stary.orchestrator import Orchestrator
+
+logger = logging.getLogger(__name__)
+
+_LOGGING_JSON = Path(__file__).resolve().parent.parent.parent / "dagster" / "logging.json"
+
+
+def _configure_logging() -> None:
+    """Bootstrap logging for the standalone CLI entry point."""
+    if _LOGGING_JSON.is_file():
+        with open(_LOGGING_JSON) as fh:
+            config = json.load(fh)
+        logging.config.dictConfig(config)
+    else:
+        logging.basicConfig(
+            level=os.getenv("STARY_LOG_LEVEL", "INFO"),
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        )
+    override = os.getenv("STARY_LOG_LEVEL")
+    if override:
+        stary_logger = logging.getLogger("stary")
+        stary_logger.setLevel(override)
+        for name in logging.root.manager.loggerDict:
+            if name.startswith("stary."):
+                logging.getLogger(name).setLevel(override)
 
 
 def main():
+    _configure_logging()
     orch = Orchestrator(
         repo_path=os.environ.get("REPO_PATH"),
     )
@@ -36,14 +65,14 @@ def main():
         # Direct ticket input (XML path or URL)
         ticket_input = args[0]
         result = orch.run(ticket_input)
-        print("\n" + "=" * 60)
-        print("FINAL RESULT")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("FINAL RESULT")
+        logger.info("=" * 60)
     elif "--once" in sys.argv:
         try:
             orch.poll_once()
         except Exception as exc:
-            print(f"[main] poll_once failed: {exc}")
+            logger.error("poll_once failed: %s", exc)
             sys.exit(1)
     else:
         orch.run_forever()

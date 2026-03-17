@@ -7,7 +7,10 @@ related tickets or comments for additional context."""
 
 from __future__ import annotations
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_jira_tools
 from stary.inference import InferenceClient, ToolDefinition, get_inference_client
@@ -84,7 +87,7 @@ class TaskReader:
             }
         """
         issue_key = JiraAdapter.extract_issue_key(ticket_input)
-        print(f"[TaskReader] Processing ticket {issue_key}")
+        logger.info("Processing ticket %s", issue_key)
 
         # Build tools for Jira access
         tools = make_jira_tools(self._jira)
@@ -105,7 +108,7 @@ class TaskReader:
                 timeout=900.0,
             )
         except Exception as exc:
-            print(f"[TaskReader] LLM failed: {exc}")
+            logger.error("LLM failed: %s", exc)
             llm_output = {}
 
         # Fetch ticket data directly as fallback for metadata
@@ -128,12 +131,14 @@ class TaskReader:
         }
 
         if not result["tasks"]:
-            print("[TaskReader] WARNING: No tasks produced, using fallback.")
+            logger.warning("No tasks produced, using fallback")
             result["tasks"] = [{"title": summary, "detail": description}]
             result["implementer_prompt"] = (
                 f"Implement the following based on this Jira ticket.\n"
                 f"Summary: {summary}\nDescription: {description}\n"
             )
 
-        print(f"[TaskReader] Produced {len(result['tasks'])} task(s) for {issue_key}.")
+        logger.info(
+            "Produced %d task(s) for %s", len(result["tasks"]), issue_key,
+        )
         return result

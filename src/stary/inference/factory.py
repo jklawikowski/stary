@@ -11,10 +11,13 @@ To add a new backend:
 The factory handles singleton management so clients are reused.
 """
 
+import logging
 import os
 from typing import Optional
 
 from stary.inference.base import InferenceClient
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Backend registry
@@ -101,7 +104,7 @@ def get_inference_client(
     module_path = BACKENDS[requested_backend]
     client_class = _import_class(module_path)
 
-    print(f"[Inference] Initializing {requested_backend} backend...")
+    logger.info("Initializing %s backend", requested_backend)
     try:
         instance = client_class(**kwargs)
     except Exception as exc:

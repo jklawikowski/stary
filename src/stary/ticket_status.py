@@ -10,8 +10,11 @@ The marker comments use the faceless/service account
 ``sys_qaplatformbot`` for production automation.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Default marker strings
@@ -99,7 +102,7 @@ class TicketStatusMarker:
         """
         comment_body = self.format_wip_comment(dagster_run_url)
         self.jira.add_comment(ticket_key, comment_body)
-        print(f"[TicketStatusMarker] Marked {ticket_key} as WIP.")
+        logger.info("Marked %s as WIP", ticket_key)
 
     def mark_done(
         self,
@@ -118,7 +121,7 @@ class TicketStatusMarker:
         """
         comment_body = self.format_done_comment(pr_url, status)
         self.jira.add_comment(ticket_key, comment_body)
-        print(f"[TicketStatusMarker] Marked {ticket_key} as done (status={status}).")
+        logger.info("Marked %s as done (status=%s)", ticket_key, status)
 
     def mark_failed(
         self,
@@ -142,9 +145,8 @@ class TicketStatusMarker:
             failed_step, error_message, dagster_run_url
         )
         self.jira.add_comment(ticket_key, comment_body)
-        print(
-            f"[TicketStatusMarker] Marked {ticket_key} as failed "
-            f"(step={failed_step})."
+        logger.info(
+            "Marked %s as failed (step=%s)", ticket_key, failed_step,
         )
 
     # ------------------------------------------------------------------

@@ -63,7 +63,10 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
         len(task_input.get("implementer_prompt", "")),
         len(task_input.get("description", "")),
     )
-    context.log.info(f"TaskReader implementer prompt: {task_input.get('implementer_prompt', '')}")
+    context.log.info(
+        "TaskReader implementer prompt: %s",
+        task_input.get("implementer_prompt", ""),
+    )
     for i, t in enumerate(task_input.get("tasks", [])):
         context.log.info(
             "  Task %d: %s (detail: %d chars)",

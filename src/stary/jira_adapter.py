@@ -8,6 +8,7 @@ Provides a clean, reusable interface for Jira operations with:
 This module has NO business logic — it's a pure data-access layer.
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +16,8 @@ from typing import Any
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -134,9 +137,9 @@ class JiraAdapter:
             timeout=self.timeout,
         )
         if not resp.ok:
-            print(
-                f"[JiraAdapter] Request failed: {method} {endpoint}\n"
-                f"  HTTP {resp.status_code}: {resp.text[:500]}"
+            logger.warning(
+                "Request failed: %s %s — HTTP %d: %.500s",
+                method, endpoint, resp.status_code, resp.text,
             )
         resp.raise_for_status()
         return resp

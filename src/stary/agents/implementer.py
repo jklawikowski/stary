@@ -6,6 +6,7 @@ One tool-calling session is run per implementation step.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -14,6 +15,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_read_tools, make_shell_tools, make_write_tools
 from stary.inference import InferenceClient, get_inference_client
@@ -102,10 +105,10 @@ class Implementer:
         summary = planner_output["summary"]
         steps = planner_output["steps"]
 
-        print(f"[Implementer] Ticket   : {ticket_id}")
-        print(f"[Implementer] Repo     : {repo_url}")
-        print(f"[Implementer] Branch   : {branch_name}")
-        print(f"[Implementer] Steps    : {len(steps)}")
+        logger.info("Ticket   : %s", ticket_id)
+        logger.info("Repo     : %s", repo_url)
+        logger.info("Branch   : %s", branch_name)
+        logger.info("Steps    : %d", len(steps))
 
         # Build tools for this repo
         read_tools = make_read_tools(self.repo_path)
@@ -115,19 +118,19 @@ class Implementer:
 
         for idx, step in enumerate(steps, 1):
             label = step.get("prompt", "")[:60]
-            print(f"\n[Implementer] --- Step {idx}/{len(steps)}: {label}... ---")
+            logger.info("--- Step %d/%d: %s... ---", idx, len(steps), label)
             self._implement_step(step, idx, len(steps), all_tools)
 
-        print(f"\n[Implementer] All {len(steps)} step(s) done.")
+        logger.info("All %d step(s) done", len(steps))
 
         self._auto_lint(self.repo_path)
 
         commit_msg = f"{ticket_id} {summary}"
         branch_url = self._commit_and_push(commit_msg, branch_name, repo_url)
-        print(f"[Implementer] Pushed to: {branch_url}")
+        logger.info("Pushed to: %s", branch_url)
 
         pr_url = self._create_pull_request(repo_url, branch_name, ticket_id, summary)
-        print(f"[Implementer] PR created: {pr_url}")
+        logger.info("PR created: %s", pr_url)
         return pr_url
 
     def _implement_step(self, step: dict, step_idx: int, total_steps: int, tools: list) -> None:
@@ -149,7 +152,7 @@ class Implementer:
             "Use the tools to read relevant files, then implement the changes."
         )
 
-        print(f"[Implementer/step{step_idx}] Starting tool-calling session...")
+        logger.info("Step %d: starting tool-calling session", step_idx)
         try:
             response = self._inference.chat_with_tools(
                 system=_STEP_SYSTEM_PROMPT,
@@ -159,9 +162,9 @@ class Implementer:
                 timeout=900.0,
                 max_iterations=30,
             )
-            print(f"[Implementer/step{step_idx}] Done. Summary: {response[:200]}")
+            logger.info("Step %d: done. Summary: %.200s", step_idx, response)
         except Exception as exc:
-            print(f"[Implementer/step{step_idx}] FAILED: {exc}")
+            logger.error("Step %d: FAILED: %s", step_idx, exc)
             raise RuntimeError(f"[Implementer] LLM failed for step {step_idx}: {exc}")
 
     def _create_pull_request(
@@ -204,7 +207,7 @@ class Implementer:
                 return resp.json()["html_url"]
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_exc = exc
-                print(f"[Implementer] PR creation attempt {attempt}/3 failed: {exc}")
+                logger.error("PR creation attempt %d/3 failed: %s", attempt, exc)
                 if attempt < 3:
                     time.sleep(2 ** attempt)
         raise RuntimeError(f"[Implementer] Failed to create PR after 3 attempts: {last_exc}")
@@ -278,18 +281,18 @@ class Implementer:
                 cmd, cwd=cwd, capture_output=True, text=True, timeout=120,
             )
             if result.returncode == 0:
-                print(f"[Implementer/lint] {label}: OK")
+                logger.info("lint %s: OK", label)
             else:
-                print(
-                    f"[Implementer/lint] {label}: exited {result.returncode}"
-                    f" — {result.stderr[:300]}"
+                logger.warning(
+                    "lint %s: exited %d — %s",
+                    label, result.returncode, result.stderr[:300],
                 )
             return result.returncode == 0
         except FileNotFoundError:
-            print(f"[Implementer/lint] {label}: not installed, skipping")
+            logger.info("lint %s: not installed, skipping", label)
             return False
         except subprocess.TimeoutExpired:
-            print(f"[Implementer/lint] {label}: timed out, skipping")
+            logger.warning("lint %s: timed out, skipping", label)
             return False
 
     def _auto_lint(self, repo_path: str) -> None:
@@ -298,9 +301,9 @@ class Implementer:
         Detects which formatters/linters the repo uses and runs their
         auto-fix modes.  Silently skips tools that are not installed.
         """
-        print("[Implementer] Running auto-lint pass...")
+        logger.info("Running auto-lint pass")
         detected = self._detect_linter_config(repo_path)
-        print(f"[Implementer/lint] Detected config: {detected}")
+        logger.info("lint detected config: %s", detected)
 
         ran_any = False
 
@@ -341,9 +344,9 @@ class Implementer:
             )
 
         if ran_any:
-            print("[Implementer] Auto-lint pass complete.")
+            logger.info("Auto-lint pass complete")
         else:
-            print("[Implementer] No formatters were available or configured.")
+            logger.info("No formatters were available or configured")
 
     # ------------------------------------------------------------------
     # Commit and push

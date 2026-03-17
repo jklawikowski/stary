@@ -10,10 +10,13 @@ The trigger user is the faceless/service account ``sys_qaplatformbot``,
 used for production automation.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
 from stary.jira_adapter import JiraComment
+
+logger = logging.getLogger(__name__)
 from stary.ticket_status import (
     DEFAULT_DONE_MARKER,
     DEFAULT_FAILED_MARKER,
@@ -132,7 +135,7 @@ class TriggerDetector:
         Uses separate JQL queries per trigger type so that comment
         fetches are only needed for retry candidates.
         """
-        print("[TriggerDetector] Querying Jira for triggered tickets …")
+        logger.info("Querying Jira for triggered tickets")
 
         triggered: list[TriggeredTicket] = []
         seen_keys: set[str] = set()
@@ -143,9 +146,9 @@ class TriggerDetector:
         ):
             seen_keys.add(issue.key)
             url = self.jira.build_browse_url(issue.key)
-            print(
-                f"[TriggerDetector] Triggered: {issue.key} → {url} "
-                f"(type=do_it, auto_merge=True)"
+            logger.info(
+                "Triggered: %s → %s (type=do_it, auto_merge=True)",
+                issue.key, url,
             )
             triggered.append(
                 TriggeredTicket(key=issue.key, url=url, auto_merge=True)
@@ -159,9 +162,9 @@ class TriggerDetector:
                 continue
             seen_keys.add(issue.key)
             url = self.jira.build_browse_url(issue.key)
-            print(
-                f"[TriggerDetector] Triggered: {issue.key} → {url} "
-                f"(type=pr_only, auto_merge=False)"
+            logger.info(
+                "Triggered: %s → %s (type=pr_only, auto_merge=False)",
+                issue.key, url,
             )
             triggered.append(
                 TriggeredTicket(key=issue.key, url=url, auto_merge=False)
@@ -176,14 +179,14 @@ class TriggerDetector:
             comments = self.jira.get_comments(issue.key)
             trigger_type, retry_count = self.parse_trigger_type(comments)
             if trigger_type is None:
-                print(f"[TriggerDetector] {issue.key}: retry not valid, skipping.")
+                logger.info("%s: retry not valid, skipping", issue.key)
                 continue
             seen_keys.add(issue.key)
             url = self.jira.build_browse_url(issue.key)
             auto_merge = trigger_type in ("do_it", "retry")
-            print(
-                f"[TriggerDetector] Triggered: {issue.key} → {url} "
-                f"(type={trigger_type}, retry_count={retry_count}, auto_merge={auto_merge})"
+            logger.info(
+                "Triggered: %s → %s (type=%s, retry_count=%d, auto_merge=%s)",
+                issue.key, url, trigger_type, retry_count, auto_merge,
             )
             triggered.append(
                 TriggeredTicket(
@@ -192,7 +195,7 @@ class TriggerDetector:
                 )
             )
 
-        print(f"[TriggerDetector] {len(triggered)} ticket(s) confirmed.")
+        logger.info("%d ticket(s) confirmed", len(triggered))
         return triggered
 
     def _base_jql(self) -> str:

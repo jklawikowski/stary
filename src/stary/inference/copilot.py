@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
-import traceback
+import time
 
 from stary.inference.base import BaseInferenceClient, ToolDefinition
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +62,9 @@ async def _run_chat(
     from copilot import CopilotClient
 
     client = CopilotClient({"github_token": github_token})
-    print("[CopilotInference] Starting CopilotClient\u2026")
+    logger.info("Starting CopilotClient")
     await client.start()
-    print("[CopilotInference] CopilotClient started.")
+    logger.info("CopilotClient started")
 
     try:
         session_cfg: dict[str, Any] = {
@@ -71,9 +74,12 @@ async def _run_chat(
         }
         if disable_tools:
             session_cfg["available_tools"] = ["_disabled_"]
-        print(f"[CopilotInference] Creating session (model={model}, tools={'off' if disable_tools else 'on'})\u2026")
+        logger.info(
+            "Creating session (model=%s, tools=%s)",
+            model, "off" if disable_tools else "on",
+        )
         session = await client.create_session(session_cfg)
-        print("[CopilotInference] Session created.")
+        logger.info("Session created")
 
         done = asyncio.Event()
         result_content: list[str] = []
@@ -91,18 +97,21 @@ async def _run_chat(
             elif etype in ("error", "session.error"):
                 detail = getattr(event.data, "message", None) or repr(event.data)
                 error_msg.append(detail)
-                print(f"[CopilotInference] SDK error event ({etype}): {detail}")
+                logger.error("SDK error event (%s): %s", etype, detail)
                 done.set()
 
         session.on(on_event)
 
-        print(f"[CopilotInference] Sending prompt ({len(full_prompt)} chars)\u2026")
+        logger.info("Sending prompt (%d chars)", len(full_prompt))
+        logger.debug("Prompt content:\n%s", full_prompt)
         await session.send({"prompt": full_prompt})
 
         try:
             await asyncio.wait_for(done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            print(f"[CopilotInference] Timeout after {timeout}s. Events: {all_events}")
+            logger.warning(
+                "Timeout after %ss. Events: %s", timeout, all_events,
+            )
             await session.destroy()
             raise RuntimeError(f"Copilot SDK timed out after {timeout}s")
 
@@ -112,10 +121,11 @@ async def _run_chat(
             raise RuntimeError(f"Copilot SDK error: {error_msg[0]}")
 
         combined = "".join(result_content)
-        print(
-            f"[CopilotInference] Response: {len(combined)} chars, "
-            f"{len(result_content)} msg(s), events: {all_events}"
+        logger.info(
+            "Response: %d chars, %d msg(s), events: %s",
+            len(combined), len(result_content), all_events,
         )
+        logger.debug("Response content:\n%s", combined)
         return combined
 
     finally:
@@ -142,11 +152,14 @@ def _make_sdk_tool(tool_def: ToolDefinition):
             except json.JSONDecodeError:
                 raw_args = {}
         try:
+            logger.debug("Tool call: %s(%s)", tool_def.name, raw_args)
             result_text = tool_def.handler(**raw_args)
-            print(f"[CopilotInference]   {tool_def.name}() -> {len(result_text)} chars")
+            logger.debug(
+                "Tool result: %s() -> %d chars", tool_def.name, len(result_text),
+            )
             return ToolResult(textResultForLlm=result_text, resultType="success")
         except Exception as exc:
-            print(f"[CopilotInference] Tool error ({tool_def.name}): {exc}")
+            logger.error("Tool error (%s): %s", tool_def.name, exc)
             return ToolResult(
                 textResultForLlm=f"Error executing tool '{tool_def.name}': {exc}",
                 resultType="failure",
@@ -195,13 +208,15 @@ async def _run_chat_with_tools(
             "on_permission_request": lambda req, inv: {"kind": "approved"},
             "system_message": {"mode": "replace", "content": system},
         }
-        print(
-            f"[CopilotInference] Creating tool session "
-            f"(model={model}, {len(tools)} custom tool(s))\u2026"
+        logger.info(
+            "Creating tool session (model=%s, %d custom tool(s))",
+            model, len(tools),
         )
         session = await client.create_session(session_cfg)
 
-        print(f"[CopilotInference] Sending prompt ({len(user)} chars) with tools\u2026")
+        logger.info("Sending prompt (%d chars) with tools", len(user))
+        logger.debug("System prompt:\n%s", system)
+        logger.debug("User prompt:\n%s", user)
         response = await session.send_and_wait(
             {"prompt": user},
             timeout=timeout,
@@ -212,7 +227,8 @@ async def _run_chat_with_tools(
             final = response.data.content or ""
 
         await session.destroy()
-        print(f"[CopilotInference] Tool session done: {len(final)} chars")
+        logger.info("Tool session done: %d chars", len(final))
+        logger.debug("Tool session response:\n%s", final)
         return final
 
     finally:
@@ -239,7 +255,7 @@ class CopilotInferenceClient(BaseInferenceClient):
         self.github_token = github_token or _get_github_token()
         self.model = model or _get_model()
         self.disable_tools = disable_tools
-        print(f"[CopilotInference] Configured with model={self.model}")
+        logger.info("Configured with model=%s", self.model)
 
     def chat(
         self,
@@ -249,16 +265,21 @@ class CopilotInferenceClient(BaseInferenceClient):
         timeout: float = 300.0,
     ) -> str:
         full_prompt = f"{system}\n\n---\n\n{user}"
+        t0 = time.monotonic()
         try:
-            return asyncio.run(
+            result = asyncio.run(
                 _run_chat(
                     self.github_token, self.model, full_prompt, timeout,
                     disable_tools=self.disable_tools,
                 )
             )
+            logger.info("chat() completed in %.1fs", time.monotonic() - t0)
+            return result
         except Exception as exc:
-            print(f"[CopilotInference] chat() failed: {exc}")
-            traceback.print_exc()
+            logger.error(
+                "chat() failed after %.1fs: %s",
+                time.monotonic() - t0, exc, exc_info=True,
+            )
             raise
 
     def chat_with_tools(
@@ -271,15 +292,22 @@ class CopilotInferenceClient(BaseInferenceClient):
         max_iterations: int = 30,
     ) -> str:
         """Native SDK tool-calling (overrides prompt-based fallback)."""
+        t0 = time.monotonic()
         try:
-            return asyncio.run(
+            result = asyncio.run(
                 _run_chat_with_tools(
                     self.github_token, self.model,
                     system, user, tools,
                     timeout, max_iterations,
                 )
             )
+            logger.info(
+                "chat_with_tools() completed in %.1fs", time.monotonic() - t0,
+            )
+            return result
         except Exception as exc:
-            print(f"[CopilotInference] chat_with_tools() failed: {exc}")
-            traceback.print_exc()
+            logger.error(
+                "chat_with_tools() failed after %.1fs: %s",
+                time.monotonic() - t0, exc, exc_info=True,
+            )
             raise

@@ -7,8 +7,11 @@ It mirrors the pattern from the qa-platform orchestrator:
     src/vistula/dagster/definitions.py
 """
 
+import json
 import logging
+import logging.config
 import os
+from pathlib import Path
 
 from dagster import Definitions
 
@@ -17,13 +20,30 @@ from stary.dagster.defs.sensors import jira_ticket_sensor, monitor_stary_failure
 
 logger = logging.getLogger(__name__)
 
+_LOGGING_JSON = Path(__file__).resolve().parent.parent.parent.parent / "dagster" / "logging.json"
+
 
 def configure_logging() -> None:
-    """Configure logging for the dagster code location."""
-    logging.basicConfig(
-        level=os.getenv("STARY_LOG_LEVEL", "INFO"),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
+    """Configure logging for the dagster code location.
+
+    Loads ``dagster/logging.json`` when available; falls back to
+    ``basicConfig`` otherwise.  The ``STARY_LOG_LEVEL`` environment
+    variable overrides the level for the ``stary`` logger.
+    """
+    if _LOGGING_JSON.is_file():
+        with open(_LOGGING_JSON) as fh:
+            config = json.load(fh)
+        logging.config.dictConfig(config)
+    else:
+        logging.basicConfig(
+            level=os.getenv("STARY_LOG_LEVEL", "INFO"),
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        )
+
+    # Allow runtime override of the stary logger level
+    override = os.getenv("STARY_LOG_LEVEL")
+    if override:
+        logging.getLogger("stary").setLevel(override)
 
 
 def create_definitions() -> Definitions:

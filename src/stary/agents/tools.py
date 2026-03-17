@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import logging
 import os
 import re
 import subprocess
@@ -17,6 +18,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from stary.inference.base import ToolDefinition, ToolParam
 
@@ -361,7 +364,7 @@ def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
                 f"Description:\n{issue.description}"
             )
         except Exception as exc:
-            print(f"[JiraTool] fetch_ticket({issue_key}) failed: {exc}")
+            logger.error("fetch_ticket(%s) failed: %s", issue_key, exc)
             return f"Error fetching ticket {issue_key}: {exc}"
 
     def get_comments(issue_key: str) -> str:

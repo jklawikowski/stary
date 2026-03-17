@@ -16,10 +16,14 @@ To add a new inference backend:
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -212,17 +216,26 @@ class BaseInferenceClient(ABC):
         )
 
         conversation = user
+        t0 = time.monotonic()
+        logger.debug("System prompt:\n%s", augmented_system)
+        logger.debug("User prompt:\n%s", user)
 
         for iteration in range(max_iterations):
             response = self.chat(augmented_system, conversation, temperature, timeout)
 
             calls = self._extract_tool_calls_from_text(response)
             if not calls:
+                logger.debug("Final response:\n%s", response)
+                logger.info(
+                    "chat_with_tools() done in %.1fs (%d iterations)",
+                    time.monotonic() - t0, iteration + 1,
+                )
                 return response  # final answer
 
             # Execute tool calls and append results
             results_parts: list[str] = []
             for tc_name, tc_args in calls:
+                logger.debug("Tool call: %s(%s)", tc_name, tc_args)
                 tool = tool_map.get(tc_name)
                 if tool:
                     try:
@@ -231,6 +244,9 @@ class BaseInferenceClient(ABC):
                         result = f"Error executing tool '{tc_name}': {exc}"
                 else:
                     result = f"Unknown tool: '{tc_name}'"
+                logger.debug(
+                    "Tool result: %s -> %d chars", tc_name, len(result),
+                )
                 results_parts.append(
                     f"## Tool result: {tc_name}\n{result}"
                 )
@@ -243,12 +259,16 @@ class BaseInferenceClient(ABC):
                 "or provide your final answer."
             )
 
-            print(
-                f"[InferenceClient] Tool iteration {iteration + 1}: "
-                f"{len(calls)} call(s) executed"
+            logger.info(
+                "Tool iteration %d: %d call(s) executed",
+                iteration + 1, len(calls),
             )
 
         # Exhausted iterations — return last response
+        logger.warning(
+            "chat_with_tools() exhausted %d iterations in %.1fs",
+            max_iterations, time.monotonic() - t0,
+        )
         return response  # type: ignore[possibly-undefined]
 
     def chat_json_with_tools(
@@ -369,8 +389,8 @@ class BaseInferenceClient(ABC):
                 except json.JSONDecodeError:
                     pass
 
-        print(f"[InferenceClient] Failed to parse JSON from response")
-        print(f"[InferenceClient] Raw content: {content[:500]}...")
+        logger.warning("Failed to parse JSON from response")
+        logger.debug("Raw content: %.500s", content)
         return {}
 
     @staticmethod
@@ -438,9 +458,9 @@ class BaseInferenceClient(ABC):
                 try:
                     return _try_parse(candidate)
                 except (json.JSONDecodeError, ValueError) as exc:
-                    print(
-                        f"[extract_json_array] Bracket-matched text "
-                        f"({len(candidate)} chars) failed to parse: {exc}"
+                    logger.warning(
+                        "Bracket-matched text (%d chars) failed to parse: %s",
+                        len(candidate), exc,
                     )
 
         # 3. Last resort — try parsing the whole text

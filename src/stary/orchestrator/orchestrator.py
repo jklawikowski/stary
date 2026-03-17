@@ -2,10 +2,13 @@
 to run the agent pipeline, and drives TaskReader -> Planner -> Implementer -> Reviewer
 for each triggered ticket."""
 
+import logging
 import os
 import time
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from stary.agents import TaskReader, Planner, Implementer, Reviewer
 from stary.inference import InferenceClient, get_inference_client
@@ -79,34 +82,43 @@ class Orchestrator:
         """
 
         # Step 1 – interpret Jira ticket
-        print("=" * 60)
-        print("STEP 1: Reading Jira ticket")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("STEP 1: Reading Jira ticket")
+        logger.info("=" * 60)
         task_input = self.task_reader.run(ticket_input)
-        print(f"[Orchestrator] TaskReader produced {len(task_input['tasks'])} task(s) for implementation.")
+        logger.info(
+            "TaskReader produced %d task(s) for implementation",
+            len(task_input["tasks"]),
+        )
 
-        print(task_input)
+        logger.debug("TaskReader output: %s", list(task_input.keys()))
 
         # Step 2 – plan & validate against repo
-        print("\n" + "=" * 60)
-        print("STEP 2: Planning & validating tasks")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("STEP 2: Planning & validating tasks")
+        logger.info("=" * 60)
         planner_output = self.planner.run(task_input)
-        print(f"[Orchestrator] Planner produced {len(planner_output.get('steps', []))} step(s).")
+        logger.info(
+            "Planner produced %d step(s)",
+            len(planner_output.get("steps", [])),
+        )
 
         # Step 3 – implement feature (generate code, commit, push, PR)
-        print("\n" + "=" * 60)
-        print("STEP 3: Implementing feature")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("STEP 3: Implementing feature")
+        logger.info("=" * 60)
         pr_url = self.implementer.run(planner_output)
-        print(f"[Orchestrator] Implementer PR: {pr_url}")
+        logger.info("Implementer PR: %s", pr_url)
 
         # Step 4 – code review
-        print("\n" + "=" * 60)
-        print(f"STEP 4: Code review (auto_merge={auto_merge})")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("STEP 4: Code review (auto_merge=%s)", auto_merge)
+        logger.info("=" * 60)
         review = self.reviewer.run(pr_url, auto_merge=auto_merge)
-        print(f"[Orchestrator] Reviewer verdict: {'APPROVED' if review.get('approved') else 'CHANGES REQUESTED'}")
+        logger.info(
+            "Reviewer verdict: %s",
+            "APPROVED" if review.get("approved") else "CHANGES REQUESTED",
+        )
 
         return {
             "task_input": task_input,
@@ -124,43 +136,48 @@ class Orchestrator:
         triggered = self._trigger_detector.poll()
 
         if not triggered:
-            print("[Orchestrator] No triggered tickets — nothing to do.")
+            logger.info("No triggered tickets — nothing to do.")
             return []
 
-        print(f"[Orchestrator] {len(triggered)} ticket(s) to process.")
+        logger.info("%d ticket(s) to process", len(triggered))
         processed: list[str] = []
 
         for ticket in triggered:
             key = ticket.key
             url = ticket.url
             auto_merge = ticket.auto_merge
-            print(f"\n[Orchestrator] >>> Processing {key}: {url} (auto_merge={auto_merge})")
+            logger.info(
+                ">>> Processing %s: %s (auto_merge=%s)",
+                key, url, auto_merge,
+            )
             try:
                 self._status_marker.mark_wip(key)
                 result = self.run(url, auto_merge=auto_merge)
                 pr_url = result.get("pr_url", "N/A")
                 review = result.get("review", {})
                 verdict = "APPROVED" if review.get("approved") else "CHANGES_REQUESTED"
-                print(f"[Orchestrator] <<< {key} pipeline finished.")
+                logger.info("<<< %s pipeline finished", key)
                 self._status_marker.mark_done(key, pr_url=pr_url, status=verdict)
                 processed.append(key)
             except Exception as exc:
-                print(f"[Orchestrator] <<< {key} pipeline FAILED: {exc}")
+                logger.error("<<< %s pipeline FAILED: %s", key, exc)
                 self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}")
 
         return processed
 
     def run_forever(self) -> None:
         """Poll the sensor in a loop and process triggered tickets."""
-        print(f"[Orchestrator] Starting sensor loop — polling every {self.poll_interval}s")
+        logger.info(
+            "Starting sensor loop — polling every %ds", self.poll_interval,
+        )
 
         while True:
             try:
                 self.poll_once()
             except requests.RequestException as exc:
-                print(f"[Orchestrator] Jira request error: {exc}")
+                logger.error("Jira request error: %s", exc)
             except Exception as exc:
-                print(f"[Orchestrator] Unexpected error: {exc}")
+                logger.error("Unexpected error: %s", exc, exc_info=True)
 
-            print(f"[Orchestrator] Sleeping {self.poll_interval}s …\n")
+            logger.debug("Sleeping %ds", self.poll_interval)
             time.sleep(self.poll_interval)

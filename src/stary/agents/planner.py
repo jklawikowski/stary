@@ -11,6 +11,7 @@ Implementer.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_read_tools
 from stary.inference import InferenceClient, ToolDefinition, ToolParam, get_inference_client
@@ -171,16 +174,16 @@ class Planner:
         repo_url = self._extract_repo_url(task_input)
         ticket_id = task_input.get("ticket_id", "UNKNOWN")
         summary = task_input.get("summary", "feature implementation")
-        print(f"[Planner] Repo URL : {repo_url}")
-        print(f"[Planner] Ticket   : {ticket_id}")
+        logger.info("Repo URL : %s", repo_url)
+        logger.info("Ticket   : %s", ticket_id)
 
         # 1. Clone
         self.repo_path = self._clone_repo(repo_url)
-        print(f"[Planner] Cloned to: {self.repo_path}")
+        logger.info("Cloned to: %s", self.repo_path)
 
         # 2. Create feature branch
         branch_name = self._create_branch(ticket_id)
-        print(f"[Planner] Branch   : {branch_name}")
+        logger.info("Branch   : %s", branch_name)
 
         # 3. Build tools for repo exploration
         tools = make_read_tools(self.repo_path)
@@ -197,7 +200,7 @@ class Planner:
             "and refine the tasks above into concrete implementation steps."
         )
 
-        print("[Planner] Starting tool-calling session for task validation...")
+        logger.info("Starting tool-calling session for task validation")
         try:
             validated = self._inference.chat_json_with_tools(
                 system=_SYSTEM_PROMPT,
@@ -208,14 +211,13 @@ class Planner:
                 max_iterations=30,
             )
         except Exception as exc:
-            print(f"[Planner] LLM failed: {exc}")
+            logger.error("LLM failed: %s", exc)
             validated = {}
 
         # 5. Handle result
         if not validated or not validated.get("steps"):
-            print(
-                "[Planner] WARNING: Task validation failed. "
-                "Falling back to original tasks."
+            logger.warning(
+                "Task validation failed. Falling back to original tasks."
             )
             fallback_steps = [
                 {
@@ -229,8 +231,8 @@ class Planner:
             ]
             validated = {"steps": fallback_steps}
         else:
-            print(
-                f"[Planner] Validation done — {len(validated['steps'])} step(s)."
+            logger.info(
+                "Validation done — %d step(s)", len(validated["steps"]),
             )
 
         return {
@@ -274,7 +276,7 @@ class Planner:
         dest = PLAYGROUND_DIR / repo_name
 
         if dest.exists():
-            print(f"[Planner] Removing existing clone at {dest}")
+            logger.info("Removing existing clone at %s", dest)
             shutil.rmtree(dest)
 
         PLAYGROUND_DIR.mkdir(parents=True, exist_ok=True)

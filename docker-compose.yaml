@@ -33,6 +33,7 @@ x-stary-config-env: &stary-config-env
   GITHUB_TOKEN: ${GITHUB_TOKEN:-}
   REPO_PATH: ${REPO_PATH:-}
   DAGSTER_BASE_URL: ${DAGSTER_BASE_URL:-http://localhost:3000}
+  STARY_LOG_LEVEL: ${STARY_LOG_LEVEL:-INFO}
 
 # ---------------------------------------------------------------------------
 # Services
