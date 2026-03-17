@@ -30,14 +30,35 @@ Your workflow:
 2. Optionally use get_comments to see any discussion or clarifications.
 3. Optionally use search_issues to find related tickets for context.
 4. Analyse the ticket and decompose it into concrete implementation tasks.
+5. Identify the TARGET REPOSITORY URL from the ticket description.
 
 CRITICAL RULES:
 - Do NOT produce your final JSON until you have fetched the ticket data.
 - Your FINAL response must be a single, valid JSON object — nothing else.
 - Do NOT include markdown fences, commentary, or prose in your final answer.
 
+## Repository URL identification — READ CAREFULLY
+
+The ticket description will contain one or more GitHub URLs. You MUST
+identify which URL points to the **target repository** where changes
+should be made.
+
+Rules for identifying the repository URL:
+- Look for GitHub URLs (github.com/<owner>/<repo>).
+- The ticket may mention MULTIPLE GitHub URLs (e.g. references to other
+  repos, example links, documentation links). Pick the one that is the
+  actual TARGET repository for the work described in the ticket.
+- Users sometimes paste a URL that points DEEPER than the repo root,
+  e.g. `github.com/org/repo/tree/main/src/module` or
+  `github.com/org/repo/blob/dev/README.md`. You MUST normalise these
+  to the repository root: `https://github.com/org/repo`.
+- Strip any trailing slashes, fragment identifiers, or query parameters.
+- Return ONLY the base repo URL in the form `https://github.com/<owner>/<repo>`.
+- If no repository URL can be identified, set repo_url to an empty string.
+
 Your final JSON must follow this schema:
 {
+  "repo_url": "<normalised GitHub repository URL, e.g. https://github.com/owner/repo>",
   "interpretation": "<one-paragraph summary of what the ticket asks for>",
   "tasks": [
     {"title": "<task title>", "detail": "<detailed technical description>"},
@@ -125,6 +146,7 @@ class TaskReader:
             "ticket_url": ticket_input if ticket_input.startswith("http") else "",
             "summary": summary,
             "description": description,
+            "repo_url": llm_output.get("repo_url", ""),
             "interpretation": llm_output.get("interpretation", ""),
             "tasks": llm_output.get("tasks", []),
             "implementer_prompt": llm_output.get("implementer_prompt", ""),

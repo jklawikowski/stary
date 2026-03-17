@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,12 +23,6 @@ from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, ToolDefinition, ToolParam, get_inference_client
 
 PLAYGROUND_DIR = Path.home() / "playground"
-
-_REPO_URL_RE = re.compile(
-    r"https?://[^\s)\"'>\[\]]+\.git\b"
-    r"|https?://github\.com/[^\s)\"'>\[\]]+",
-    re.IGNORECASE,
-)
 
 _IGNORED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -244,21 +237,34 @@ class Planner:
 
     @staticmethod
     def _extract_repo_url(task_input: dict) -> str:
-        explicit = task_input.get("repo_url", "").strip()
-        if explicit:
-            return explicit
+        """Return the target repository URL from LLM analysis."""
+        repo_url = task_input.get("repo_url", "").strip()
+        if not repo_url:
+            raise ValueError(
+                "[Planner] Could not find a repository URL in the task input. "
+                "Ensure the ticket description contains a GitHub URL."
+            )
+        return Planner._normalise_github_url(repo_url)
 
-        for field in ("description", "implementer_prompt", "interpretation"):
-            text = task_input.get(field, "")
-            match = _REPO_URL_RE.search(text)
-            if match:
-                return match.group(0).rstrip("/")
+    @staticmethod
+    def _normalise_github_url(url: str) -> str:
+        """Normalise a GitHub URL to ``https://github.com/<owner>/<repo>``.
 
-        raise ValueError(
-            "[Planner] Could not find a repository URL in the task input. "
-            "Ensure the ticket description contains a GitHub URL or pass "
-            "'repo_url' explicitly."
-        )
+        Handles deep links like ``/tree/main/src/...`` or ``/blob/dev/...``
+        and strips trailing slashes, ``.git`` suffixes, query strings, and
+        fragment identifiers.
+        """
+        from urllib.parse import urlparse
+
+        url = url.strip().rstrip("/")
+        parsed = urlparse(url)
+        parts = [p for p in parsed.path.strip("/").split("/") if p]
+        if len(parts) < 2:
+            return url  # Can't normalise — return as-is
+        owner, repo = parts[0], parts[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        return f"https://github.com/{owner}/{repo}"
 
     # ------------------------------------------------------------------
     # Clone
