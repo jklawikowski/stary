@@ -39,7 +39,7 @@ JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
 @sensor(
     job=stary_pipeline_with_markers,
     name="jira_ticket_sensor",
-    minimum_interval_seconds=60,
+    minimum_interval_seconds=600,
     description=(
         "Polls Jira for tickets with the trigger comment. "
         "Yields a RunRequest for each triggered ticket. "

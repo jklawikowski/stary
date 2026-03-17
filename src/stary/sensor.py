@@ -129,60 +129,103 @@ class TriggerDetector:
     def poll(self) -> list[TriggeredTicket]:
         """Query Jira and return triggered tickets.
 
-        Returns:
-            List of TriggeredTicket objects
+        Uses separate JQL queries per trigger type so that comment
+        fetches are only needed for retry candidates.
         """
-        print("[TriggerDetector] Querying Jira for tickets with trigger comment …")
-        issues = self._search_triggered_tickets()
-        print(f"[TriggerDetector] JQL returned {len(issues)} candidate(s).")
+        print("[TriggerDetector] Querying Jira for triggered tickets …")
 
         triggered: list[TriggeredTicket] = []
-        for issue in issues:
-            key = issue.key
-            trigger_type, retry_count = self._get_trigger_type(key)
-            if trigger_type is None:
-                print(f"[TriggerDetector] {key}: trigger not valid, skipping.")
-                continue
-            ticket_url = self.jira.build_browse_url(key)
-            # For retry, use the same auto_merge behavior as "do_it"
-            auto_merge = trigger_type in ("do_it", "retry")
-            trigger_info = f"type={trigger_type}"
-            if retry_count > 0:
-                trigger_info += f", retry_count={retry_count}"
+        seen_keys: set[str] = set()
+
+        # "do it" triggers — resolved entirely from JQL
+        for issue in self.jira.search_issues(
+            self._build_do_it_jql(), fields=["key"], max_results=50,
+        ):
+            seen_keys.add(issue.key)
+            url = self.jira.build_browse_url(issue.key)
             print(
-                f"[TriggerDetector] Triggered: {key} → {ticket_url} "
-                f"({trigger_info}, auto_merge={auto_merge})"
+                f"[TriggerDetector] Triggered: {issue.key} → {url} "
+                f"(type=do_it, auto_merge=True)"
+            )
+            triggered.append(
+                TriggeredTicket(key=issue.key, url=url, auto_merge=True)
+            )
+
+        # "pull request" triggers — resolved from JQL, deduplicated
+        for issue in self.jira.search_issues(
+            self._build_pr_only_jql(), fields=["key"], max_results=50,
+        ):
+            if issue.key in seen_keys:
+                continue
+            seen_keys.add(issue.key)
+            url = self.jira.build_browse_url(issue.key)
+            print(
+                f"[TriggerDetector] Triggered: {issue.key} → {url} "
+                f"(type=pr_only, auto_merge=False)"
+            )
+            triggered.append(
+                TriggeredTicket(key=issue.key, url=url, auto_merge=False)
+            )
+
+        # Retry triggers — only these need a comment fetch for validation
+        for issue in self.jira.search_issues(
+            self._build_retry_jql(), fields=["key"], max_results=50,
+        ):
+            if issue.key in seen_keys:
+                continue
+            comments = self.jira.get_comments(issue.key)
+            trigger_type, retry_count = self.parse_trigger_type(comments)
+            if trigger_type is None:
+                print(f"[TriggerDetector] {issue.key}: retry not valid, skipping.")
+                continue
+            seen_keys.add(issue.key)
+            url = self.jira.build_browse_url(issue.key)
+            auto_merge = trigger_type in ("do_it", "retry")
+            print(
+                f"[TriggerDetector] Triggered: {issue.key} → {url} "
+                f"(type={trigger_type}, retry_count={retry_count}, auto_merge={auto_merge})"
             )
             triggered.append(
                 TriggeredTicket(
-                    key=key,
-                    url=ticket_url,
-                    auto_merge=auto_merge,
-                    retry_count=retry_count,
+                    key=issue.key, url=url,
+                    auto_merge=auto_merge, retry_count=retry_count,
                 )
             )
 
         print(f"[TriggerDetector] {len(triggered)} ticket(s) confirmed.")
         return triggered
 
-    def build_jql(self) -> str:
-        """Build JQL query for triggered tickets.
-
-        Includes tickets with:
-        - Normal triggers (do it / pull request) without failed marker
-        - Retry trigger (allows failed tickets to be re-processed)
-
-        The retry validation (count < max, newer than failed) is done in Python.
-
-        Public for testing/debugging purposes.
-        """
+    def _base_jql(self) -> str:
+        """Common JQL predicates shared by all trigger queries."""
         return (
             'status != Closed AND status != Done AND status != Resolved '
-            f'AND (comment ~ "\\"{self.config.trigger_comment}\\"" '
-            f'OR comment ~ "\\"{self.config.trigger_pr_only}\\"" '
-            f'OR comment ~ "\\"{self.config.trigger_retry}\\"") '
+            'AND updated >= -7d '
             f'AND NOT comment ~ "\\"{self.config.wip_marker}\\"" '
             f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
+        )
+
+    def _build_do_it_jql(self) -> str:
+        """JQL for "do it" triggers (excludes failed tickets)."""
+        return (
+            self._base_jql()
+            + f'AND comment ~ "\\"{self.config.trigger_comment}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+        )
+
+    def _build_pr_only_jql(self) -> str:
+        """JQL for "pull request" triggers (excludes failed tickets)."""
+        return (
+            self._base_jql()
+            + f'AND comment ~ "\\"{self.config.trigger_pr_only}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+        )
+
+    def _build_retry_jql(self) -> str:
+        """JQL for retry triggers (requires failed marker)."""
+        return (
+            self._base_jql()
+            + f'AND comment ~ "\\"{self.config.trigger_retry}\\"" '
+            f'AND comment ~ "\\"{self.config.failed_marker}\\"" '
         )
 
     def parse_trigger_type(
@@ -272,20 +315,4 @@ class TriggerDetector:
         # Retry must be newer (higher index) than the last failure
         return last_retry_idx > last_failed_idx
 
-    # ------------------------------------------------------------------
-    # Internal methods
-    # ------------------------------------------------------------------
 
-    def _search_triggered_tickets(self) -> list:
-        """Search for candidate tickets using JQL."""
-        jql = self.build_jql()
-        return self.jira.search_issues(jql, fields=["key"], max_results=50)
-
-    def _get_trigger_type(self, issue_key: str) -> tuple[str | None, int]:
-        """Determine which trigger comment is present for an issue.
-
-        Returns:
-            Tuple of (trigger_type, retry_count)
-        """
-        comments = self.jira.get_comments(issue_key)
-        return self.parse_trigger_type(comments)

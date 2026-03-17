@@ -35,9 +35,8 @@ RUN --mount=type=cache,mode=0777,uid=$USER_UID,gid=$USER_GID,target=/home/$USER_
 
 COPY ./requirements/ /requirements/
 RUN --mount=type=cache,uid=$USER_UID,gid=$USER_GID,mode=0777,target=/home/$USER_NAME/.cache/pip \
-    pip3 install -r /requirements/dagster_user_deployment.txt
+    pip3 install -r /requirements/dagster.txt
 
-# Install stary package from built wheel
 ARG PROJECT_VERSION
 ARG PIP_PACKAGE_NAME=stary
 ARG NETRC="/home/$USER_NAME/.netrc"
@@ -45,15 +44,7 @@ RUN --mount=type=secret,id=netrc,uid=$USER_UID,target=/home/$USER_NAME/.netrc \
     --mount=type=cache,uid=$USER_UID,gid=$USER_GID,mode=0777,target=/home/$USER_NAME/.cache/pip \
     pip3 install --user $PIP_PACKAGE_NAME==$PROJECT_VERSION
 
-# ARG GIT_USER_NAME="Stary Automation"
-# ARG GIT_USER_EMAIL="stary-bot@noreply.github.com"
-# RUN git config --global user.name "$GIT_USER_NAME" && \
-#     git config --global user.email "$GIT_USER_EMAIL"
-
 COPY ./dagster/logging.json .
 EXPOSE 4000
 
 CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4000", "-m", "stary.dagster.definitions"]
-
-# HEALTHCHECK --interval=10s --timeout=10s --retries=5 --start-period=30s \
-#     CMD ["dagster", "api", "grpc-health-check", "-p", "4000"]
