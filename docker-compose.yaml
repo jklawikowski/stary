@@ -89,9 +89,9 @@ services:
       <<: [*proxy-env, *dagster-db-env, *stary-config-env]
       DAGSTER_CURRENT_IMAGE: stary-user-deployment
     healthcheck:
-      test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "0.0.0.0", "-p", "4000"]
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "localhost", "-p", "4000"]
       interval: 10s
-      timeout: 10s
+      timeout: 5s
       retries: 5
       start_period: 30s
 
