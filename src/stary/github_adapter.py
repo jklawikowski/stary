@@ -61,6 +61,7 @@ class PullRequest:
     additions: int = 0
     deletions: int = 0
     changed_files: int = 0
+    node_id: str = ""
 
 
 @dataclass
@@ -209,6 +210,14 @@ class GitHubAdapter:
         """Execute a PUT request."""
         return self._request("PUT", endpoint, json_body=json_body)
 
+    def _patch(
+        self,
+        endpoint: str,
+        json_body: dict | None = None,
+    ) -> requests.Response:
+        """Execute a PATCH request."""
+        return self._request("PATCH", endpoint, json_body=json_body)
+
     # ------------------------------------------------------------------
     # Pull request operations
     # ------------------------------------------------------------------
@@ -237,6 +246,7 @@ class GitHubAdapter:
             additions=data.get("additions", 0),
             deletions=data.get("deletions", 0),
             changed_files=data.get("changed_files", 0),
+            node_id=data.get("node_id", ""),
         )
 
     def get_pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
@@ -287,6 +297,7 @@ class GitHubAdapter:
         head: str,
         base: str,
         body: str = "",
+        draft: bool = False,
     ) -> PullRequest:
         """Create a new pull request.
 
@@ -297,6 +308,7 @@ class GitHubAdapter:
             head: Head branch name
             base: Base branch name
             body: PR body (markdown)
+            draft: If True, create the PR as a draft
 
         Returns:
             PullRequest object
@@ -308,6 +320,7 @@ class GitHubAdapter:
                 "head": head,
                 "base": base,
                 "body": body,
+                "draft": draft,
             },
         )
         data = resp.json()
@@ -318,7 +331,57 @@ class GitHubAdapter:
             base_ref=base,
             head_ref=head,
             body=body,
+            node_id=data.get("node_id", ""),
         )
+
+    def mark_pr_ready_for_review(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> bool:
+        """Convert a draft PR to ready for review via the GraphQL API.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+
+        Returns:
+            True if successfully marked as ready
+        """
+        pr = self.get_pull_request(owner, repo, pr_number)
+        if not pr.node_id:
+            logger.error("Cannot mark ready: no node_id for PR #%d", pr_number)
+            return False
+
+        query = """
+            mutation($prId: ID!) {
+                markPullRequestReadyForReview(input: {pullRequestId: $prId}) {
+                    pullRequest { isDraft }
+                }
+            }
+        """
+        resp = self._session.post(
+            f"{self.api_url}/graphql",
+            headers=self._headers(),
+            json={"query": query, "variables": {"prId": pr.node_id}},
+            timeout=self.timeout,
+        )
+        if not resp.ok:
+            logger.error(
+                "GraphQL markPullRequestReadyForReview failed: HTTP %d: %.500s",
+                resp.status_code, resp.text,
+            )
+            return False
+
+        data = resp.json()
+        if "errors" in data:
+            logger.error("GraphQL errors: %s", data["errors"])
+            return False
+
+        logger.info("PR #%d marked as ready for review", pr_number)
+        return True
 
     def merge_pull_request(
         self,

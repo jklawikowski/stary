@@ -129,12 +129,18 @@ class Reviewer:
         comment_url = self._post_pr_comment(owner, repo, pr_number, review)
         review["github_comment_url"] = comment_url
 
-        # Merge if approved
+        # Mark as ready for review if approved (PR is created as draft)
         review["merged"] = False
-        if review["approved"] and auto_merge:
-            review["merged"] = self._github.merge_pull_request(owner, repo, pr_number)
-        elif review["approved"] and not auto_merge:
-            logger.info("PR approved but auto_merge=False, skipping merge")
+        if review["approved"]:
+            ready = self._github.mark_pr_ready_for_review(owner, repo, pr_number)
+            if not ready:
+                logger.warning("Failed to mark PR #%d as ready for review", pr_number)
+            if auto_merge:
+                review["merged"] = self._github.merge_pull_request(owner, repo, pr_number)
+            else:
+                logger.info("PR approved but auto_merge=False, skipping merge")
+        else:
+            logger.info("PR #%d not approved, keeping as draft", pr_number)
 
         return review
 

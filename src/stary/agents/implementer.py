@@ -178,6 +178,7 @@ class Implementer:
                 f"**Summary:** {summary}\n\n"
                 f"Branch: `{branch_name}`"
             ),
+            draft=True,
         )
         return pr.html_url
 
