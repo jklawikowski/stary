@@ -4,7 +4,9 @@ Mirrors the pattern from the qa-platform orchestrator
 (src/vistula/dagster/defs/sensors.py).
 
 Sensors:
-    jira_ticket_sensor – Polls Jira for triggered tickets and yields RunRequests
+    jira_do_it_sensor    – Polls Jira for "do it" triggered tickets
+    jira_pr_only_sensor  – Polls Jira for "pull request" triggered tickets
+    jira_retry_sensor    – Polls Jira for retry triggered tickets
 """
 
 import logging
@@ -21,7 +23,7 @@ from dagster import (
 from stary.config import build_dagster_run_url, get_dagster_base_url
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
 from stary.jira_adapter import JiraAdapter
-from stary.sensor import TriggerConfig, TriggerDetector
+from stary.sensor import TriggerConfig, TriggerDetector, TriggeredTicket
 
 logger = logging.getLogger(__name__)
 
@@ -32,46 +34,25 @@ JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
 
 
-# ---------------------------------------------------------------------------
-# Jira ticket sensor
-# ---------------------------------------------------------------------------
+def _build_trigger_config() -> TriggerConfig:
+    """Build TriggerConfig from environment variables."""
+    query_span_days = int(os.environ.get("STARY_QUERY_SPAN_DAYS", "1"))
+    jira_labels_raw = os.environ.get("STARY_JIRA_LABELS", "")
+    jira_labels = [l.strip() for l in jira_labels_raw.split(",") if l.strip()] or None
+    return TriggerConfig(query_span_days=query_span_days, jira_labels=jira_labels)
 
-@sensor(
-    job=stary_pipeline_with_markers,
-    name="jira_ticket_sensor",
-    minimum_interval_seconds=600,
-    description=(
-        "Polls Jira for tickets with the trigger comment. "
-        "Yields a RunRequest for each triggered ticket. "
-        "Uses Copilot SDK for LLM inference (requires COPILOT_GITHUB_TOKEN or GH_TOKEN)."
-    ),
-)
-def jira_ticket_sensor() -> Generator:
-    """Dagster sensor that replaces Orchestrator.run_forever().
 
-    Uses the TriggerDetector and JiraAdapter to query Jira for triggered
-    tickets and yields a RunRequest for each one, passing all necessary
-    configuration to the ops via run_config.
-
-    LLM inference is handled by the Copilot SDK which reads COPILOT_GITHUB_TOKEN
-    or GH_TOKEN from environment automatically.
-    """
-    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
-    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
-
-    # Create Jira adapter and trigger detector
-    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    detector = TriggerDetector(jira)
-    triggered = detector.poll()
-
+def _yield_run_requests(
+    triggered: list[TriggeredTicket],
+    jira_base_url: str,
+) -> Generator:
+    """Yield RunRequests for a list of triggered tickets."""
     for ticket in triggered:
         ticket_key = ticket.key
         ticket_url = ticket.url
         auto_merge = ticket.auto_merge
         retry_count = ticket.retry_count
 
-        # Dynamic run_key: includes retry_count to allow Dagster to create
-        # new runs for retries (otherwise same run_key would be skipped)
         run_key = f"stary-{ticket_key}-{retry_count}"
 
         run_config = {
@@ -108,6 +89,73 @@ def jira_ticket_sensor() -> Generator:
             run_config=run_config,
             tags={"ticket_key": ticket_key, "retry_count": str(retry_count)},
         )
+
+
+# ---------------------------------------------------------------------------
+# Jira ticket sensors (split by trigger type)
+# ---------------------------------------------------------------------------
+
+@sensor(
+    job=stary_pipeline_with_markers,
+    name="jira_do_it_sensor",
+    minimum_interval_seconds=600,
+    description=(
+        "Polls Jira for tickets with the 'do it' trigger comment. "
+        "Yields a RunRequest for each triggered ticket (auto_merge=True)."
+    ),
+)
+def jira_do_it_sensor() -> Generator:
+    """Dagster sensor for 'do it' triggers."""
+    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
+    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+
+    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+    detector = TriggerDetector(jira, config=_build_trigger_config())
+    triggered = detector.poll_do_it()
+
+    yield from _yield_run_requests(triggered, jira_base_url)
+
+
+@sensor(
+    job=stary_pipeline_with_markers,
+    name="jira_pr_only_sensor",
+    minimum_interval_seconds=600,
+    description=(
+        "Polls Jira for tickets with the 'pull request' trigger comment. "
+        "Yields a RunRequest for each triggered ticket (auto_merge=False)."
+    ),
+)
+def jira_pr_only_sensor() -> Generator:
+    """Dagster sensor for 'pull request' triggers."""
+    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
+    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+
+    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+    detector = TriggerDetector(jira, config=_build_trigger_config())
+    triggered = detector.poll_pr_only()
+
+    yield from _yield_run_requests(triggered, jira_base_url)
+
+
+@sensor(
+    job=stary_pipeline_with_markers,
+    name="jira_retry_sensor",
+    minimum_interval_seconds=600,
+    description=(
+        "Polls Jira for tickets with the 'retry' trigger comment. "
+        "Yields a RunRequest for each triggered ticket after validating retry count."
+    ),
+)
+def jira_retry_sensor() -> Generator:
+    """Dagster sensor for 'retry' triggers."""
+    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
+    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+
+    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+    detector = TriggerDetector(jira, config=_build_trigger_config())
+    triggered = detector.poll_retry()
+
+    yield from _yield_run_requests(triggered, jira_base_url)
 
 
 # ---------------------------------------------------------------------------

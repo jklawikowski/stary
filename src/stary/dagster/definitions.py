@@ -16,7 +16,12 @@ from pathlib import Path
 from dagster import Definitions
 
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
-from stary.dagster.defs.sensors import jira_ticket_sensor, monitor_stary_failures
+from stary.dagster.defs.sensors import (
+    jira_do_it_sensor,
+    jira_pr_only_sensor,
+    jira_retry_sensor,
+    monitor_stary_failures,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +61,7 @@ def create_definitions() -> Definitions:
     configure_logging()
     return Definitions(
         jobs=[stary_pipeline, stary_pipeline_with_markers],
-        sensors=[jira_ticket_sensor, monitor_stary_failures],
+        sensors=[jira_do_it_sensor, jira_pr_only_sensor, jira_retry_sensor, monitor_stary_failures],
     )
 
 

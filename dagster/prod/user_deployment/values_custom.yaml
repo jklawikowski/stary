@@ -8,7 +8,7 @@ deployments:
   - name: "stary"
     image:
       repository: ger-is-registry.caas.intel.com/qa-platform/tools/stary/stary
-      tag: 0.1.1
+      tag: 0.2.3
       pullPolicy: IfNotPresent
     dagsterApiGrpcArgs:
       - "-m"

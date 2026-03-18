@@ -50,6 +50,8 @@ class TriggerConfig:
     failed_marker: str = DEFAULT_FAILED_MARKER
     retry_marker: str = DEFAULT_RETRY_MARKER
     max_retry_count: int = MAX_RETRY_COUNT
+    query_span_days: int = 1
+    jira_labels: list[str] | None = None
 
 
 @dataclass
@@ -130,7 +132,7 @@ class TriggerDetector:
     # ------------------------------------------------------------------
 
     def poll(self) -> list[TriggeredTicket]:
-        """Query Jira and return triggered tickets.
+        """Query Jira and return triggered tickets (all trigger types).
 
         Uses separate JQL queries per trigger type so that comment
         fetches are only needed for retry candidates.
@@ -140,10 +142,26 @@ class TriggerDetector:
         triggered: list[TriggeredTicket] = []
         seen_keys: set[str] = set()
 
-        # "do it" triggers — resolved entirely from JQL
+        triggered.extend(self.poll_do_it(seen_keys))
+        triggered.extend(self.poll_pr_only(seen_keys))
+        triggered.extend(self.poll_retry(seen_keys))
+
+        logger.info("%d ticket(s) confirmed", len(triggered))
+        return triggered
+
+    def poll_do_it(
+        self, seen_keys: set[str] | None = None,
+    ) -> list[TriggeredTicket]:
+        """Query Jira for "do it" triggered tickets only."""
+        if seen_keys is None:
+            seen_keys = set()
+        triggered: list[TriggeredTicket] = []
+
         for issue in self.jira.search_issues(
             self._build_do_it_jql(), fields=["key"], max_results=50,
         ):
+            if issue.key in seen_keys:
+                continue
             seen_keys.add(issue.key)
             url = self.jira.build_browse_url(issue.key)
             logger.info(
@@ -154,7 +172,16 @@ class TriggerDetector:
                 TriggeredTicket(key=issue.key, url=url, auto_merge=True)
             )
 
-        # "pull request" triggers — resolved from JQL, deduplicated
+        return triggered
+
+    def poll_pr_only(
+        self, seen_keys: set[str] | None = None,
+    ) -> list[TriggeredTicket]:
+        """Query Jira for "pull request" triggered tickets only."""
+        if seen_keys is None:
+            seen_keys = set()
+        triggered: list[TriggeredTicket] = []
+
         for issue in self.jira.search_issues(
             self._build_pr_only_jql(), fields=["key"], max_results=50,
         ):
@@ -170,7 +197,16 @@ class TriggerDetector:
                 TriggeredTicket(key=issue.key, url=url, auto_merge=False)
             )
 
-        # Retry triggers — only these need a comment fetch for validation
+        return triggered
+
+    def poll_retry(
+        self, seen_keys: set[str] | None = None,
+    ) -> list[TriggeredTicket]:
+        """Query Jira for retry triggered tickets only."""
+        if seen_keys is None:
+            seen_keys = set()
+        triggered: list[TriggeredTicket] = []
+
         for issue in self.jira.search_issues(
             self._build_retry_jql(), fields=["key"], max_results=50,
         ):
@@ -195,14 +231,19 @@ class TriggerDetector:
                 )
             )
 
-        logger.info("%d ticket(s) confirmed", len(triggered))
         return triggered
 
     def _base_jql(self) -> str:
         """Common JQL predicates shared by all trigger queries."""
+        if self.config.jira_labels:
+            quoted = ', '.join(f'"{l}"' for l in self.config.jira_labels)
+            labels_clause = f'labels in ({quoted}) AND '
+        else:
+            labels_clause = ''
         return (
+            f'{labels_clause}'
             'status != Closed AND status != Done AND status != Resolved '
-            'AND updated >= -7d '
+            f'AND updated >= -{self.config.query_span_days}d '
             f'AND NOT comment ~ "\\"{self.config.wip_marker}\\"" '
             f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
         )

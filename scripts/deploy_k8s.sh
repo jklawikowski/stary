@@ -14,7 +14,7 @@ REPOSITORY=$DOCKER_REGISTRY_URL/$REPOSITORY/$PROJECT_NAME
 sed -i 's/$DOCKER_TAG/'$DOCKER_TAG'/' ./dagster/prod/user_deployment/values_custom.yaml
 sed -i 's/$IMAGE_PULL_SECRET/'$IMAGE_PULL_SECRET'/' ./dagster/prod/user_deployment/values_custom.yaml
 sed -i "s#\$REPOSITORY#$REPOSITORY#g" ./dagster/prod/user_deployment/values_custom.yaml
-helm upgrade --install user-code dagster/dagster-user-deployments -f ./dagster/prod/user_deployment/values_base.yaml -f ./dagster/prod/user_deployment/values_custom.yaml --version "1.3.14" --skip-schema-validation 
+helm upgrade --install stary dagster/dagster-user-deployments -f ./dagster/prod/user_deployment/values_base.yaml -f ./dagster/prod/user_deployment/values_custom.yaml --version "1.3.14" --skip-schema-validation 
 sed -i 's/'$DOCKER_TAG'/$DOCKER_TAG/' ./dagster/prod/user_deployment/values_custom.yaml
 sed -i 's/'$IMAGE_PULL_SECRET'/$IMAGE_PULL_SECRET/' ./dagster/prod/user_deployment/values_custom.yaml
 sed -i "s#$REPOSITORY#\$REPOSITORY#g" ./dagster/prod/user_deployment/values_custom.yaml

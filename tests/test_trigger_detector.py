@@ -8,7 +8,7 @@ Verifies that the 3-query approach minimises Jira API calls:
 from unittest.mock import MagicMock
 
 from stary.jira_adapter import JiraComment, JiraIssue
-from stary.sensor import TriggerDetector
+from stary.sensor import TriggerConfig, TriggerDetector
 
 
 def _make_detector():
@@ -201,11 +201,53 @@ class TestJqlQueries:
         assert "retry" in jql
         assert "stary:failed" in jql
 
-    def test_all_queries_filter_by_updated_within_7_days(self):
+    def test_all_queries_filter_by_updated_span(self):
         detector, _ = _make_detector()
         for jql in (
             detector._build_do_it_jql(),
             detector._build_pr_only_jql(),
             detector._build_retry_jql(),
         ):
-            assert "updated >= -7d" in jql
+            assert "updated >= -1d" in jql
+
+    def test_custom_query_span_days(self):
+        config = TriggerConfig(query_span_days=3)
+        detector, _ = _make_detector()
+        detector.config = config
+        for jql in (
+            detector._build_do_it_jql(),
+            detector._build_pr_only_jql(),
+            detector._build_retry_jql(),
+        ):
+            assert "updated >= -3d" in jql
+
+    def test_single_label_filter(self):
+        config = TriggerConfig(jira_labels=["gdn_qa"])
+        detector, _ = _make_detector()
+        detector.config = config
+        for jql in (
+            detector._build_do_it_jql(),
+            detector._build_pr_only_jql(),
+            detector._build_retry_jql(),
+        ):
+            assert 'labels in ("gdn_qa")' in jql
+
+    def test_multiple_labels_filter(self):
+        config = TriggerConfig(jira_labels=["gdn_qa", "stary"])
+        detector, _ = _make_detector()
+        detector.config = config
+        for jql in (
+            detector._build_do_it_jql(),
+            detector._build_pr_only_jql(),
+            detector._build_retry_jql(),
+        ):
+            assert 'labels in ("gdn_qa", "stary")' in jql
+
+    def test_no_label_filter_when_empty(self):
+        detector, _ = _make_detector()
+        for jql in (
+            detector._build_do_it_jql(),
+            detector._build_pr_only_jql(),
+            detector._build_retry_jql(),
+        ):
+            assert "labels" not in jql
