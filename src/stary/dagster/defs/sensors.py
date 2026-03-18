@@ -98,7 +98,7 @@ def _yield_run_requests(
 @sensor(
     job=stary_pipeline_with_markers,
     name="jira_do_it_sensor",
-    minimum_interval_seconds=600,
+    minimum_interval_seconds=1800,
     description=(
         "Polls Jira for tickets with the 'do it' trigger comment. "
         "Yields a RunRequest for each triggered ticket (auto_merge=True)."
@@ -119,7 +119,7 @@ def jira_do_it_sensor() -> Generator:
 @sensor(
     job=stary_pipeline_with_markers,
     name="jira_pr_only_sensor",
-    minimum_interval_seconds=600,
+    minimum_interval_seconds=1800,
     description=(
         "Polls Jira for tickets with the 'pull request' trigger comment. "
         "Yields a RunRequest for each triggered ticket (auto_merge=False)."
@@ -140,7 +140,7 @@ def jira_pr_only_sensor() -> Generator:
 @sensor(
     job=stary_pipeline_with_markers,
     name="jira_retry_sensor",
-    minimum_interval_seconds=600,
+    minimum_interval_seconds=1800,
     description=(
         "Polls Jira for tickets with the 'retry' trigger comment. "
         "Yields a RunRequest for each triggered ticket after validating retry count."
