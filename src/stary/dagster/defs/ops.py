@@ -287,8 +287,14 @@ def mark_ticket_done(context: OpExecutionContext, review_result: Dict) -> None:
     status_marker = TicketStatusMarker(jira)
 
     pr_urls = review_result.get("pr_urls", [])
+    reviews = review_result.get("reviews", [])
     pr_summary = ", ".join(pr_urls) if pr_urls else "N/A"
-    status_marker.mark_done(cfg["ticket_key"], pr_url=pr_summary, status=cfg["status"])
+    status_marker.mark_done(
+        cfg["ticket_key"],
+        pr_url=pr_summary,
+        status=cfg["status"],
+        reviews=reviews or None,
+    )
     context.log.info(
         "Marked %s as done (status=%s, prs=%s)",
         cfg["ticket_key"],

@@ -259,7 +259,7 @@ class Orchestrator:
                 all_approved = all(r.get("approved") for r in reviews) if reviews else False
                 verdict = "APPROVED" if all_approved else "CHANGES_REQUESTED"
                 logger.info("<<< %s pipeline finished", key)
-                self._status_marker.mark_done(key, pr_url=pr_summary, status=verdict)
+                self._status_marker.mark_done(key, pr_url=pr_summary, status=verdict, reviews=reviews or None)
                 processed.append(key)
             except Exception as exc:
                 logger.error("<<< %s pipeline FAILED: %s", key, exc)

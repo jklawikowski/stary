@@ -109,6 +109,7 @@ class TicketStatusMarker:
         ticket_key: str,
         pr_url: str,
         status: str,
+        reviews: list[dict] | None = None,
     ) -> None:
         """Add a done marker comment with pipeline results.
 
@@ -118,8 +119,9 @@ class TicketStatusMarker:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             pr_url: URL to the created pull request
             status: Pipeline status (e.g., "APPROVED", "CHANGES_REQUESTED")
+            reviews: Optional list of review dicts (parallel to pr_urls)
         """
-        comment_body = self.format_done_comment(pr_url, status)
+        comment_body = self.format_done_comment(pr_url, status, reviews)
         self.jira.add_comment(ticket_key, comment_body)
         logger.info("Marked %s as done (status=%s)", ticket_key, status)
 
@@ -176,22 +178,35 @@ class TicketStatusMarker:
             lines.append(f"[View live pipeline status|{dagster_run_url}]")
         return "\n".join(lines)
 
-    def format_done_comment(self, pr_url: str, status: str) -> str:
+    def format_done_comment(
+        self,
+        pr_url: str,
+        status: str,
+        reviews: list[dict] | None = None,
+    ) -> str:
         """Build the done comment body.
 
         Args:
-            pr_url: URL to the created pull request
+            pr_url: URL to the created pull request(s), comma-separated
             status: Pipeline status
+            reviews: Optional list of review dicts (parallel to pr_urls)
 
         Returns:
             Formatted comment body
         """
-        return (
-            f"{self.config.done_marker}\n"
-            f"Status: {status}\n"
-            f"PR: {pr_url}\n"
-            f"Processed by stary automation."
-        )
+        pr_urls = [u.strip() for u in pr_url.split(",") if u.strip()]
+        lines = [
+            self.config.done_marker,
+            f"Status: {status}",
+        ]
+        for idx, url in enumerate(pr_urls):
+            approved = None
+            if reviews and idx < len(reviews):
+                approved = reviews[idx].get("approved")
+            emoticon = "(/)" if approved else "(!)" if approved is not None else ""
+            lines.append(f"{emoticon} {url}" if emoticon else url)
+        lines.append("Processed by STARY.")
+        return "\n".join(lines)
 
     def format_failed_comment(
         self,
