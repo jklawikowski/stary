@@ -245,31 +245,34 @@ class TriggerDetector:
             'status != Closed AND status != Done AND status != Resolved '
             f'AND updated >= -{self.config.query_span_days}d '
             f'AND NOT comment ~ "\\"{self.config.wip_marker}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
+
         )
 
     def _build_do_it_jql(self) -> str:
-        """JQL for "do it" triggers (excludes failed tickets)."""
+        """JQL for "do it" triggers (excludes failed and done tickets)."""
         return (
             self._base_jql()
-            + f'AND comment ~ "\\"{self.config.trigger_comment}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+            + f'AND comment ~ "\\"\{self.config.trigger_comment}\\"" '
+            f'AND NOT comment ~ "\\"\{self.config.failed_marker}\\"" '
+            f'AND NOT comment ~ "\\"\{self.config.processed_marker}\\"" '
         )
 
     def _build_pr_only_jql(self) -> str:
-        """JQL for "pull request" triggers (excludes failed tickets)."""
+        """JQL for "pull request" triggers (excludes failed and done tickets)."""
         return (
             self._base_jql()
-            + f'AND comment ~ "\\"{self.config.trigger_pr_only}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+            + f'AND comment ~ "\\"\{self.config.trigger_pr_only}\\"" '
+            f'AND NOT comment ~ "\\"\{self.config.failed_marker}\\"" '
+            f'AND NOT comment ~ "\\"\{self.config.processed_marker}\\"" '
         )
 
     def _build_retry_jql(self) -> str:
-        """JQL for retry triggers (requires failed marker)."""
+        """JQL for retry triggers (requires a terminal marker: failed or done)."""
         return (
             self._base_jql()
-            + f'AND comment ~ "\\"{self.config.trigger_retry}\\"" '
-            f'AND comment ~ "\\"{self.config.failed_marker}\\"" '
+            + f'AND comment ~ "\\"\{self.config.trigger_retry}\\"" '
+            f'AND (comment ~ "\\"\{self.config.failed_marker}\\"" '
+            f'OR comment ~ "\\"\{self.config.processed_marker}\\"") '
         )
 
     def parse_trigger_type(
@@ -292,20 +295,24 @@ class TriggerDetector:
         has_failed = any(
             self.config.failed_marker in c.body for c in comments
         )
+        has_done = any(
+            self.config.processed_marker in c.body for c in comments
+        )
+        has_terminal = has_failed or has_done
         retry_count = self._count_retry_comments(comments)
 
         # Check if retry is requested and valid
-        if retry_count > 0 and has_failed:
+        if retry_count > 0 and has_terminal:
             if retry_count <= self.config.max_retry_count:
-                if self._is_retry_newer_than_failed(comments):
+                if self._is_retry_newer_than_terminal(comments):
                     return "retry", retry_count
-                # Retry comment exists but is older than failed marker
+                # Retry comment exists but is older than last terminal marker
                 return None, 0
             # Max retries exceeded
             return None, 0
 
-        # If ticket has failed marker but no valid retry, reject
-        if has_failed:
+        # If ticket has a terminal marker but no valid retry, reject
+        if has_terminal:
             return None, 0
 
         # Normal trigger detection
@@ -335,28 +342,34 @@ class TriggerDetector:
             1 for c in comments if self.config.trigger_retry in c.body
         )
 
-    def _is_retry_newer_than_failed(
+    def _is_retry_newer_than_terminal(
         self,
         comments: list[JiraComment],
     ) -> bool:
-        """Check if the most recent retry comment is newer than the most recent failed marker.
+        """Check if the most recent retry comment is newer than the last terminal marker.
+
+        A terminal marker is either a done or failed marker. The retry
+        comment must be posted after the most recent terminal marker to
+        be considered valid. This prevents infinite re-triggering after
+        a pipeline completes.
 
         Args:
             comments: List of JiraComment objects (assumed ordered by creation time)
 
         Returns:
-            True if retry is newer than the last failure, False otherwise
+            True if retry is newer than the last terminal marker, False otherwise
         """
         last_retry_idx = -1
-        last_failed_idx = -1
+        last_terminal_idx = -1
 
         for idx, c in enumerate(comments):
             if self.config.trigger_retry in c.body:
                 last_retry_idx = idx
-            if self.config.failed_marker in c.body:
-                last_failed_idx = idx
+            if (self.config.failed_marker in c.body
+                    or self.config.processed_marker in c.body):
+                last_terminal_idx = idx
 
-        # Retry must be newer (higher index) than the last failure
-        return last_retry_idx > last_failed_idx
+        # Retry must be newer (higher index) than the last terminal marker
+        return last_retry_idx > last_terminal_idx
 
 

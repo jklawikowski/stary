@@ -103,7 +103,7 @@ class TestPrOnlyTrigger:
 
 
 class TestRetryTrigger:
-    def test_valid_retry_fetches_comments(self):
+    def test_valid_retry_after_failure_fetches_comments(self):
         detector, jira = _make_detector()
         jira.search_issues.side_effect = [
             [],                          # do_it
@@ -122,6 +122,44 @@ class TestRetryTrigger:
         assert tickets[0].auto_merge is True
         assert tickets[0].retry_count == 1
         jira.get_comments.assert_called_once_with("PROJ-3")
+
+    def test_valid_retry_after_done_fetches_comments(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [],                          # do_it
+            [],                          # pr_only
+            [JiraIssue(key="PROJ-3")],   # retry
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(id="1", body="[~sys_qaplatformbot] do it"),
+            JiraComment(id="2", body="[~sys_qaplatformbot] stary:done"),
+            JiraComment(id="3", body="[~sys_qaplatformbot] retry"),
+        ]
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 1
+        assert tickets[0].key == "PROJ-3"
+        assert tickets[0].retry_count == 1
+        jira.get_comments.assert_called_once_with("PROJ-3")
+
+    def test_retry_older_than_done_is_skipped(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [],
+            [],
+            [JiraIssue(key="PROJ-3")],
+        ]
+        # retry older than done → invalid (pipeline already completed after retry)
+        jira.get_comments.return_value = [
+            JiraComment(id="1", body="[~sys_qaplatformbot] retry"),
+            JiraComment(id="2", body="[~sys_qaplatformbot] stary:done"),
+        ]
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 0
+        jira.get_comments.assert_called_once()
 
     def test_invalid_retry_is_skipped(self):
         detector, jira = _make_detector()
@@ -183,23 +221,26 @@ class TestApiCallCount:
 
 
 class TestJqlQueries:
-    def test_do_it_jql_excludes_failed_marker(self):
+    def test_do_it_jql_excludes_failed_and_done_markers(self):
         detector, _ = _make_detector()
         jql = detector._build_do_it_jql()
         assert "do it" in jql
         assert "stary:failed" in jql
+        assert "stary:done" in jql
 
-    def test_pr_only_jql_excludes_failed_marker(self):
+    def test_pr_only_jql_excludes_failed_and_done_markers(self):
         detector, _ = _make_detector()
         jql = detector._build_pr_only_jql()
         assert "pull request" in jql
         assert "stary:failed" in jql
+        assert "stary:done" in jql
 
-    def test_retry_jql_requires_failed_marker(self):
+    def test_retry_jql_requires_terminal_marker(self):
         detector, _ = _make_detector()
         jql = detector._build_retry_jql()
         assert "retry" in jql
         assert "stary:failed" in jql
+        assert "stary:done" in jql
 
     def test_all_queries_filter_by_updated_span(self):
         detector, _ = _make_detector()
