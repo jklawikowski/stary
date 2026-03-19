@@ -252,27 +252,27 @@ class TriggerDetector:
         """JQL for "do it" triggers (excludes failed and done tickets)."""
         return (
             self._base_jql()
-            + f'AND comment ~ "\\"\{self.config.trigger_comment}\\"" '
-            f'AND NOT comment ~ "\\"\{self.config.failed_marker}\\"" '
-            f'AND NOT comment ~ "\\"\{self.config.processed_marker}\\"" '
+            + f'AND comment ~ "\\"{self.config.trigger_comment}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
         )
 
     def _build_pr_only_jql(self) -> str:
         """JQL for "pull request" triggers (excludes failed and done tickets)."""
         return (
             self._base_jql()
-            + f'AND comment ~ "\\"\{self.config.trigger_pr_only}\\"" '
-            f'AND NOT comment ~ "\\"\{self.config.failed_marker}\\"" '
-            f'AND NOT comment ~ "\\"\{self.config.processed_marker}\\"" '
+            + f'AND comment ~ "\\"{self.config.trigger_pr_only}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
         )
 
     def _build_retry_jql(self) -> str:
         """JQL for retry triggers (requires a terminal marker: failed or done)."""
         return (
             self._base_jql()
-            + f'AND comment ~ "\\"\{self.config.trigger_retry}\\"" '
-            f'AND (comment ~ "\\"\{self.config.failed_marker}\\"" '
-            f'OR comment ~ "\\"\{self.config.processed_marker}\\"") '
+            + f'AND comment ~ "\\"{self.config.trigger_retry}\\"" '
+            f'AND (comment ~ "\\"{self.config.failed_marker}\\"" '
+            f'OR comment ~ "\\"{self.config.processed_marker}\\"") '
         )
 
     def parse_trigger_type(
