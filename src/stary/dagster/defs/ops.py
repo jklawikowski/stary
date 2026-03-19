@@ -50,30 +50,23 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
     context.log.info("TaskReader: reading ticket %s", ticket_url)
     task_input = agent.run(ticket_url)
 
+    ticket_id = task_input.get("ticket_id", "UNKNOWN")
+    tasks = task_input.get("tasks", [])
+    repo_urls = sorted({t["repo_url"] for t in tasks if t.get("repo_url")})
+
     context.log.info(
-        "TaskReader: produced %d task(s) for ticket %s",
-        len(task_input.get("tasks", [])),
-        task_input.get("ticket_id", "UNKNOWN"),
+        "TaskReader: %s — %d task(s) across %d repo(s)",
+        ticket_id, len(tasks), len(repo_urls),
     )
-    context.log.info(
-        "TaskReader output keys: %s | interpretation length: %d | "
-        "implementer_prompt length: %d | description length: %d",
-        list(task_input.keys()),
-        len(task_input.get("interpretation", "")),
-        len(task_input.get("implementer_prompt", "")),
-        len(task_input.get("description", "")),
-    )
-    context.log.info(
-        "TaskReader implementer prompt: %s",
-        task_input.get("implementer_prompt", ""),
-    )
-    for i, t in enumerate(task_input.get("tasks", [])):
-        context.log.info(
-            "  Task %d: %s (detail: %d chars)",
-            i + 1,
-            t.get("title", "<no title>"),
-            len(t.get("detail", "")),
-        )
+    for repo_url in repo_urls:
+        repo_tasks = [t for t in tasks if t.get("repo_url") == repo_url]
+        context.log.info("  repo: %s — %d task(s)", repo_url, len(repo_tasks))
+        for t in repo_tasks:
+            context.log.info(
+                "    - %s (detail: %d chars)",
+                t.get("title", "<no title>"),
+                len(t.get("detail", "")),
+            )
     return task_input
 
 
@@ -82,35 +75,67 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Clone repo, scan context, and validate/align tasks via Planner LLM call.",
+    description="Group tasks by repo, clone each, validate/align tasks via Planner LLM.",
     ins={"task_input": In(Dict)},
     out=Out(Dict),
 )
 def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
-    """Clone the target repo, gather context, and validate tasks via LLM."""
+    """Group tasks by repo URL and run the Planner on each repo group.
+
+    Returns a dict with a ``repo_plans`` list — one planner_output per repo.
+    """
+    from collections import defaultdict
+
     from stary.agents import Planner
 
-    agent = Planner()
+    ticket_id = task_input.get("ticket_id", "UNKNOWN")
 
+    # Group tasks by repo_url
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for task in task_input.get("tasks", []):
+        repo_url = task.get("repo_url", "")
+        if not repo_url:
+            context.log.warning("Task '%s' has no repo_url — skipping", task.get("title"))
+            continue
+        groups[repo_url].append(task)
+
+    if not groups:
+        raise RuntimeError("No tasks with a repo_url found in TaskReader output.")
+
+    repo_count = len(groups)
     context.log.info(
-        "Planner: validating ticket %s",
-        task_input.get("ticket_id", "UNKNOWN"),
+        "Planner: %s — %d repo(s) to plan", ticket_id, repo_count,
     )
-    planner_output = agent.run(task_input)
-    context.log.info(
-        "Planner: validated=%s, branch=%s, steps=%d",
-        bool(planner_output.get("steps")),
-        planner_output.get("branch_name", "UNKNOWN"),
-        len(planner_output.get("steps", [])),
-    )
-    for i, step in enumerate(planner_output.get("steps", [])):
+
+    repo_plans: list[dict] = []
+    for idx, (repo_url, tasks) in enumerate(groups.items(), 1):
+        prefix = f"[repo {idx}/{repo_count}] {repo_url}"
+        context.log.info("%s", "=" * 60)
+        context.log.info("%s — %d task(s)", prefix, len(tasks))
+        context.log.info("%s", "=" * 60)
+
+        group_input = {
+            "repo_url": repo_url,
+            "ticket_id": ticket_id,
+            "summary": task_input.get("summary", ""),
+            "tasks": tasks,
+        }
+        agent = Planner()
+        planner_output = agent.run(group_input)
+        repo_plans.append(planner_output)
+
         context.log.info(
-            "  Step %d: %s (target_files: %s)",
-            i + 1,
-            step.get("prompt", ""),
-            step.get("target_files", []),
+            "%s — branch=%s, %d step(s)",
+            prefix,
+            planner_output.get("branch_name", "UNKNOWN"),
+            len(planner_output.get("steps", [])),
         )
-    return planner_output
+        for i, step in enumerate(planner_output.get("steps", []), 1):
+            context.log.info(
+                "  step %d: %s", i, step.get("prompt", "")[:80],
+            )
+
+    return {"repo_plans": repo_plans, "ticket_id": ticket_id}
 
 
 # ---------------------------------------------------------------------------
@@ -118,24 +143,41 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Generate code via Implementer LLM call, commit/push, and create a PR.",
-    ins={"planner_output": In(Dict)},
-    out=Out(str),
+    description="Generate code via Implementer LLM call per repo, commit/push, and create PRs.",
+    ins={"plan_result": In(Dict)},
+    out=Out(Dict),
 )
-def implement_feature(context: OpExecutionContext, planner_output: Dict) -> str:
-    """Generate code from planner output, commit/push, and create a PR."""
+def implement_feature(context: OpExecutionContext, plan_result: Dict) -> Dict[str, Any]:
+    """Implement each repo plan and return all PR URLs."""
     from stary.agents import Implementer
 
-    agent = Implementer()
+    repo_plans = plan_result.get("repo_plans", [])
+    ticket_id = plan_result.get("ticket_id", "UNKNOWN")
+    repo_count = len(repo_plans)
 
-    ticket_id = planner_output.get("ticket_id", "UNKNOWN")
     context.log.info(
-        "Implementer: implementing ticket %s",
-        ticket_id,
+        "Implementer: %s — %d repo(s) to implement", ticket_id, repo_count,
     )
-    pr_url = agent.run(planner_output)
-    context.log.info("Implementer: PR created at %s", pr_url)
-    return pr_url
+
+    pr_urls: list[str] = []
+    for idx, plan in enumerate(repo_plans, 1):
+        repo_url = plan.get("repo_url", "UNKNOWN")
+        steps = plan.get("steps", [])
+        prefix = f"[repo {idx}/{repo_count}] {repo_url}"
+        context.log.info("%s", "=" * 60)
+        context.log.info("%s — %d step(s)", prefix, len(steps))
+        context.log.info("%s", "=" * 60)
+
+        agent = Implementer()
+        pr_url = agent.run(plan)
+        pr_urls.append(pr_url)
+        context.log.info("%s — PR created: %s", prefix, pr_url)
+
+    context.log.info(
+        "Implementer: %s — all %d repo(s) done, %d PR(s) created",
+        ticket_id, repo_count, len(pr_urls),
+    )
+    return {"pr_urls": pr_urls, "ticket_id": ticket_id}
 
 
 # ---------------------------------------------------------------------------
@@ -143,26 +185,42 @@ def implement_feature(context: OpExecutionContext, planner_output: Dict) -> str:
 # ---------------------------------------------------------------------------
 
 @op(
-    description="Review the PR using Reviewer – Copilot SDK-powered code review.",
+    description="Review all PRs using Reviewer – Copilot SDK-powered code review.",
     config_schema={
         "auto_merge": Field(bool, default_value=True, is_required=False),
     },
-    ins={"pr_url": In(str)},
+    ins={"impl_result": In(Dict)},
     out=Out(Dict),
 )
-def review_code(context: OpExecutionContext, pr_url: str) -> Dict[str, Any]:
-    """Perform an automated code review on the PR and optionally merge."""
+def review_code(context: OpExecutionContext, impl_result: Dict) -> Dict[str, Any]:
+    """Perform automated code review on all PRs and optionally merge."""
     from stary.agents import Reviewer
 
     cfg = context.op_config
-    agent = Reviewer()
     auto_merge = cfg.get("auto_merge", True)
+    pr_urls = impl_result.get("pr_urls", [])
 
-    context.log.info("Reviewer: reviewing PR %s (auto_merge=%s)", pr_url, auto_merge)
-    review = agent.run(pr_url, auto_merge=auto_merge)
-    verdict = "APPROVED" if review.get("approved") else "CHANGES REQUESTED"
-    context.log.info("Reviewer: verdict = %s", verdict)
-    return review
+    pr_count = len(pr_urls)
+    context.log.info("Reviewer: %d PR(s) to review", pr_count)
+
+    reviews: list[dict] = []
+    for idx, pr_url in enumerate(pr_urls, 1):
+        prefix = f"[PR {idx}/{pr_count}]"
+        context.log.info("%s", "-" * 60)
+        context.log.info("%s reviewing %s (auto_merge=%s)", prefix, pr_url, auto_merge)
+
+        agent = Reviewer()
+        review = agent.run(pr_url, auto_merge=auto_merge)
+        reviews.append(review)
+        verdict = "APPROVED" if review.get("approved") else "CHANGES REQUESTED"
+        context.log.info("%s verdict: %s", prefix, verdict)
+
+    all_approved = all(r.get("approved") for r in reviews) if reviews else False
+    context.log.info(
+        "Reviewer: done — %d/%d approved",
+        sum(1 for r in reviews if r.get("approved")), pr_count,
+    )
+    return {"reviews": reviews, "all_approved": all_approved, "pr_urls": pr_urls}
 
 
 # ---------------------------------------------------------------------------
@@ -213,10 +271,10 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
         "status": str,
         "jira_base_url": str,
     },
-    ins={"pr_url": In(str), "review_result": In(Dict)},
+    ins={"review_result": In(Dict)},
     out=Out(Nothing),
 )
-def mark_ticket_done(context: OpExecutionContext, pr_url: str, review_result: Dict) -> None:
+def mark_ticket_done(context: OpExecutionContext, review_result: Dict) -> None:
     """Add a done-marker comment on the Jira ticket."""
     from stary.jira_adapter import JiraAdapter
     from stary.ticket_status import TicketStatusMarker
@@ -227,10 +285,13 @@ def mark_ticket_done(context: OpExecutionContext, pr_url: str, review_result: Di
         raise RuntimeError("JIRA_TOKEN environment variable is not set")
     jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
     status_marker = TicketStatusMarker(jira)
-    status_marker.mark_done(cfg["ticket_key"], pr_url=pr_url, status=cfg["status"])
+
+    pr_urls = review_result.get("pr_urls", [])
+    pr_summary = ", ".join(pr_urls) if pr_urls else "N/A"
+    status_marker.mark_done(cfg["ticket_key"], pr_url=pr_summary, status=cfg["status"])
     context.log.info(
-        "Marked %s as done (status=%s, pr=%s)",
+        "Marked %s as done (status=%s, prs=%s)",
         cfg["ticket_key"],
         cfg["status"],
-        pr_url,
+        pr_summary,
     )

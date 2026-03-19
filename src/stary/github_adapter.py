@@ -334,6 +334,21 @@ class GitHubAdapter:
             node_id=data.get("node_id", ""),
         )
 
+    def append_to_pr_body(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        text: str,
+    ) -> None:
+        """Append text to an existing PR's body."""
+        pr = self.get_pull_request(owner, repo, pr_number)
+        new_body = (pr.body or "") + text
+        self._patch(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            json_body={"body": new_body},
+        )
+
     def mark_pr_ready_for_review(
         self,
         owner: str,

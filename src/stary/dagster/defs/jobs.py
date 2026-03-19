@@ -35,12 +35,12 @@ logger = logging.getLogger(__name__)
 def stary_pipeline_graph() -> None:
     """Full Stary agent pipeline.
 
-    TaskReader (read_jira_ticket) → Planner (plan_tasks) → Implementer (implement_feature) → Reviewer (review_code)
+    TaskReader → Planner (per repo) → Implementer (per repo) → Reviewer
     """
     task_input = read_jira_ticket()
-    planner_output = plan_tasks(task_input)
-    pr_url = implement_feature(planner_output)
-    review_code(pr_url)
+    plan_result = plan_tasks(task_input)
+    impl_result = implement_feature(plan_result)
+    review_code(impl_result)
 
 
 stary_pipeline = stary_pipeline_graph.to_job(
@@ -66,10 +66,10 @@ def stary_pipeline_with_markers_graph() -> None:
     """
     wip_done = mark_ticket_wip()
     task_input = read_jira_ticket(after=wip_done)
-    planner_output = plan_tasks(task_input)
-    pr_url = implement_feature(planner_output)
-    review_result = review_code(pr_url)
-    mark_ticket_done(pr_url=pr_url, review_result=review_result)
+    plan_result = plan_tasks(task_input)
+    impl_result = implement_feature(plan_result)
+    review_result = review_code(impl_result)
+    mark_ticket_done(review_result=review_result)
 
 
 stary_pipeline_with_markers = stary_pipeline_with_markers_graph.to_job(

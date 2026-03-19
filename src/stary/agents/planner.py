@@ -6,29 +6,27 @@ directories, read files, and search code.  The LLM autonomously
 explores the repo to validate and refine the task list from
 TaskReader, producing concrete implementation steps for the
 Implementer.
+
+The Planner operates on a single repository at a time.  The
+Orchestrator is responsible for grouping tasks by repo and calling
+the Planner once per repo.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_read_tools
 from stary.github_adapter import GitHubAdapter
-from stary.inference import InferenceClient, ToolDefinition, ToolParam, get_inference_client
+from stary.inference import InferenceClient, get_inference_client
 
 PLAYGROUND_DIR = Path.home() / "playground"
-
-_IGNORED_DIRS = {
-    ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
-    ".eggs", "*.egg-info",
-}
 
 _SYSTEM_PROMPT = """\
 You are an expert software engineer performing a pre-implementation
@@ -125,7 +123,11 @@ answer as ONLY valid JSON (no markdown fences) with this schema:
 
 class Planner:
     """Clones the target repository and uses tool-calling to explore it,
-    then validates and refines the task list for the Implementer."""
+    then validates and refines the task list for the Implementer.
+
+    Operates on a single repository.  The Orchestrator groups tasks by
+    repo and calls ``run()`` once per repo.
+    """
 
     def __init__(
         self,
@@ -146,19 +148,19 @@ class Planner:
         Parameters
         ----------
         task_input : dict
-            Output of TaskReader.
+            Must contain:
+                repo_url  – the GitHub repo URL for this group.
+                tasks     – list of task dicts for this repo.
+                ticket_id – Jira ticket key.
+                summary   – ticket summary string.
 
         Returns
         -------
         dict – Context for the Implementer:
-            - steps       : list[dict]
-            - repo_url    : str
-            - repo_path   : str
-            - branch_name : str
-            - ticket_id   : str
-            - summary     : str
+            steps, repo_url, repo_path, branch_name, ticket_id,
+            summary, fork_owner.
         """
-        repo_url = self._extract_repo_url(task_input)
+        repo_url = self._normalise_github_url(task_input["repo_url"])
         ticket_id = task_input.get("ticket_id", "UNKNOWN")
         summary = task_input.get("summary", "feature implementation")
         logger.info("Repo URL : %s", repo_url)
@@ -176,7 +178,6 @@ class Planner:
             )
             clone_url = self._github.fork_repo(owner, repo_name_parsed)
             fork_owner = self._github.get_authenticated_user()
-            # Keep the fork's default branch in sync with upstream
             default_branch = self._github.get_repo_default_branch(
                 fork_owner, repo_name_parsed,
             )
@@ -199,8 +200,6 @@ class Planner:
         user = (
             f"## Tasks from ticket analysis\n```json\n{tasks_json}\n```\n\n"
             f"## Ticket summary\n{summary}\n\n"
-            f"## Implementer prompt from TaskReader\n"
-            f"{task_input.get('implementer_prompt', '(none)')}\n\n"
             "Start by exploring the repository structure with list_directory "
             "and reading key files to understand the codebase. Then validate "
             "and refine the tasks above into concrete implementation steps."
@@ -223,7 +222,7 @@ class Planner:
         # 6. Handle result
         if not validated or not validated.get("steps"):
             logger.warning(
-                "Task validation failed. Falling back to original tasks."
+                "Task validation failed. Falling back to original tasks.",
             )
             fallback_steps = [
                 {
@@ -252,19 +251,8 @@ class Planner:
         }
 
     # ------------------------------------------------------------------
-    # Repo URL extraction
+    # URL normalisation
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_repo_url(task_input: dict) -> str:
-        """Return the target repository URL from LLM analysis."""
-        repo_url = task_input.get("repo_url", "").strip()
-        if not repo_url:
-            raise ValueError(
-                "[Planner] Could not find a repository URL in the task input. "
-                "Ensure the ticket description contains a GitHub URL."
-            )
-        return Planner._normalise_github_url(repo_url)
 
     @staticmethod
     def _normalise_github_url(url: str) -> str:
@@ -274,8 +262,6 @@ class Planner:
         and strips trailing slashes, ``.git`` suffixes, query strings, and
         fragment identifiers.
         """
-        from urllib.parse import urlparse
-
         url = url.strip().rstrip("/")
         parsed = urlparse(url)
         parts = [p for p in parsed.path.strip("/").split("/") if p]
@@ -291,8 +277,6 @@ class Planner:
     # ------------------------------------------------------------------
 
     def _clone_repo(self, repo_url: str) -> str:
-        from urllib.parse import urlparse
-
         parsed = urlparse(repo_url)
         repo_name = Path(parsed.path).stem
         dest = PLAYGROUND_DIR / repo_name
