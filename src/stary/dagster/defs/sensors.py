@@ -140,7 +140,7 @@ def jira_pr_only_sensor() -> Generator:
 @sensor(
     job=stary_pipeline_with_markers,
     name="jira_retry_sensor",
-    minimum_interval_seconds=1800,
+    minimum_interval_seconds=3600,
     description=(
         "Polls Jira for tickets with the 'retry' trigger comment. "
         "Yields a RunRequest for each triggered ticket after validating retry count."
