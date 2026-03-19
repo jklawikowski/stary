@@ -304,5 +304,5 @@ class Planner:
 
     def _create_branch(self, ticket_id: str) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        branch_name = f"dev/sys_qaplatformbot/{ticket_id}{ts}"
+        branch_name = f"dev/sys_qaplatformbot/{ticket_id}--{ts}"
         return self._github.create_branch(self.repo_path, branch_name)
