@@ -294,6 +294,97 @@ class TestGetRepoDefaultBranch:
         assert branch == "main"
 
 
+class TestCanPush:
+    def test_returns_true_when_push_allowed(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(json_data={
+            "permissions": {"admin": False, "push": True, "pull": True},
+        })
+
+        assert adapter.can_push("owner", "repo") is True
+
+    def test_returns_false_when_push_denied(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(json_data={
+            "permissions": {"admin": False, "push": False, "pull": True},
+        })
+
+        assert adapter.can_push("owner", "repo") is False
+
+    def test_returns_false_when_permissions_missing(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(json_data={})
+
+        assert adapter.can_push("owner", "repo") is False
+
+
+class TestGetAuthenticatedUser:
+    def test_returns_login(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(json_data={
+            "login": "botuser",
+        })
+
+        assert adapter.get_authenticated_user() == "botuser"
+
+
+class TestForkRepo:
+    def test_creates_fork_and_returns_clone_url(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+
+        # First call: POST /repos/owner/repo/forks
+        fork_resp = _mock_response(json_data={
+            "clone_url": "https://github.com/botuser/repo.git",
+            "owner": {"login": "botuser"},
+        })
+        # Second call: GET /repos/botuser/repo (fork ready check)
+        ready_resp = _mock_response(json_data={"full_name": "botuser/repo"})
+        adapter._session.request.side_effect = [fork_resp, ready_resp]
+
+        url = adapter.fork_repo("owner", "repo")
+
+        assert url == "https://github.com/botuser/repo.git"
+        assert adapter._session.request.call_count == 2
+
+
+class TestSyncFork:
+    def test_sync_success(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(json_data={
+            "merge_type": "fast-forward",
+        })
+
+        assert adapter.sync_fork("botuser", "repo", "main") is True
+
+    def test_sync_already_up_to_date(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        resp_409 = _mock_response(status_code=409, ok=False)
+        http_err = requests.HTTPError("Conflict")
+        http_err.response = resp_409
+        resp_409.raise_for_status.side_effect = http_err
+        adapter._session.request.return_value = resp_409
+
+        assert adapter.sync_fork("botuser", "repo", "main") is True
+
+    def test_sync_failure_returns_false(self):
+        adapter = _make_adapter()
+        adapter._session = MagicMock()
+        resp_500 = _mock_response(status_code=500, ok=False)
+        http_err = requests.HTTPError("Server Error")
+        http_err.response = resp_500
+        resp_500.raise_for_status.side_effect = http_err
+        adapter._session.request.return_value = resp_500
+
+        assert adapter.sync_fork("botuser", "repo", "main") is False
+
+
 class TestGetRepoTree:
     def test_returns_blob_paths_only(self):
         adapter = _make_adapter()

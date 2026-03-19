@@ -164,18 +164,37 @@ class Planner:
         logger.info("Repo URL : %s", repo_url)
         logger.info("Ticket   : %s", ticket_id)
 
-        # 1. Clone
-        self.repo_path = self._clone_repo(repo_url)
+        # 1. Check push permissions and fork if necessary
+        owner, repo_name_parsed = GitHubAdapter.parse_repo_url(repo_url)
+        if self._github.can_push(owner, repo_name_parsed):
+            fork_owner = None
+            clone_url = repo_url
+            logger.info("Direct push access confirmed for %s/%s", owner, repo_name_parsed)
+        else:
+            logger.info(
+                "No push access to %s/%s — forking", owner, repo_name_parsed,
+            )
+            clone_url = self._github.fork_repo(owner, repo_name_parsed)
+            fork_owner = self._github.get_authenticated_user()
+            # Keep the fork's default branch in sync with upstream
+            default_branch = self._github.get_repo_default_branch(
+                fork_owner, repo_name_parsed,
+            )
+            self._github.sync_fork(fork_owner, repo_name_parsed, default_branch)
+            logger.info("Using fork: %s/%s", fork_owner, repo_name_parsed)
+
+        # 2. Clone
+        self.repo_path = self._clone_repo(clone_url)
         logger.info("Cloned to: %s", self.repo_path)
 
-        # 2. Create feature branch
+        # 3. Create feature branch
         branch_name = self._create_branch(ticket_id)
         logger.info("Branch   : %s", branch_name)
 
-        # 3. Build tools for repo exploration
+        # 4. Build tools for repo exploration
         tools = make_read_tools(self.repo_path)
 
-        # 4. Call LLM with tools to validate and refine tasks
+        # 5. Call LLM with tools to validate and refine tasks
         tasks_json = json.dumps(task_input.get("tasks", []), indent=2)
         user = (
             f"## Tasks from ticket analysis\n```json\n{tasks_json}\n```\n\n"
@@ -201,7 +220,7 @@ class Planner:
             logger.error("LLM failed: %s", exc)
             validated = {}
 
-        # 5. Handle result
+        # 6. Handle result
         if not validated or not validated.get("steps"):
             logger.warning(
                 "Task validation failed. Falling back to original tasks."
@@ -229,6 +248,7 @@ class Planner:
             "branch_name": branch_name,
             "ticket_id": ticket_id,
             "summary": summary,
+            "fork_owner": fork_owner,
         }
 
     # ------------------------------------------------------------------

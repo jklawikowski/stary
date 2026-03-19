@@ -99,11 +99,14 @@ class Implementer:
         ticket_id = planner_output["ticket_id"]
         summary = planner_output["summary"]
         steps = planner_output["steps"]
+        fork_owner = planner_output.get("fork_owner")
 
         logger.info("Ticket   : %s", ticket_id)
         logger.info("Repo     : %s", repo_url)
         logger.info("Branch   : %s", branch_name)
         logger.info("Steps    : %d", len(steps))
+        if fork_owner:
+            logger.info("Fork     : %s (cross-repo PR)", fork_owner)
 
         # Build tools for this repo
         read_tools = make_read_tools(self.repo_path)
@@ -121,10 +124,14 @@ class Implementer:
         self._auto_lint(self.repo_path)
 
         commit_msg = f"{ticket_id} {summary}"
-        branch_url = self._commit_and_push(commit_msg, branch_name, repo_url)
+        branch_url = self._commit_and_push(
+            commit_msg, branch_name, repo_url, fork_owner=fork_owner,
+        )
         logger.info("Pushed to: %s", branch_url)
 
-        pr_url = self._create_pull_request(repo_url, branch_name, ticket_id, summary)
+        pr_url = self._create_pull_request(
+            repo_url, branch_name, ticket_id, summary, fork_owner=fork_owner,
+        )
         logger.info("PR created: %s", pr_url)
         return pr_url
 
@@ -164,14 +171,21 @@ class Implementer:
 
     def _create_pull_request(
         self, repo_url: str, branch_name: str, ticket_id: str,
-        summary: str, base_branch: str = "master",
+        summary: str, base_branch: str | None = None,
+        fork_owner: str | None = None,
     ) -> str:
         owner, repo = GitHubAdapter.parse_repo_url(repo_url)
+        if base_branch is None:
+            base_branch = self._github.get_repo_default_branch(owner, repo)
+
+        # For cross-repo (fork) PRs the head must be "fork_owner:branch".
+        head = f"{fork_owner}:{branch_name}" if fork_owner else branch_name
+
         pr = self._github.create_pull_request(
             owner=owner,
             repo=repo,
             title=f"{ticket_id} {summary}",
-            head=branch_name,
+            head=head,
             base=base_branch,
             body=(
                 f"Automated implementation for **{ticket_id}**.\n\n"
@@ -322,10 +336,20 @@ class Implementer:
     # Commit and push
     # ------------------------------------------------------------------
 
-    def _commit_and_push(self, commit_msg: str, branch_name: str, repo_url: str) -> str:
+    def _commit_and_push(
+        self, commit_msg: str, branch_name: str, repo_url: str,
+        fork_owner: str | None = None,
+    ) -> str:
+        # When using a fork, push to the fork URL rather than upstream.
+        if fork_owner:
+            _, repo_name = GitHubAdapter.parse_repo_url(repo_url)
+            push_url = f"https://github.com/{fork_owner}/{repo_name}"
+        else:
+            push_url = repo_url
+
         return self._github.commit_and_push(
             repo_path=self.repo_path,
-            repo_url=repo_url,
+            repo_url=push_url,
             branch_name=branch_name,
             commit_msg=commit_msg,
         )

@@ -450,6 +450,86 @@ class GitHubAdapter:
     # Repository operations
     # ------------------------------------------------------------------
 
+    def can_push(self, owner: str, repo: str) -> bool:
+        """Check whether the authenticated user can push to a repository.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+
+        Returns:
+            True if the token grants push access
+        """
+        resp = self._get(f"/repos/{owner}/{repo}")
+        return resp.json().get("permissions", {}).get("push", False)
+
+    def get_authenticated_user(self) -> str:
+        """Return the login of the authenticated user.
+
+        Returns:
+            GitHub username string
+        """
+        resp = self._get("/user")
+        return resp.json()["login"]
+
+    def fork_repo(self, owner: str, repo: str) -> str:
+        """Fork a repository into the authenticated user's account.
+
+        If the fork already exists GitHub returns it immediately.
+
+        Args:
+            owner: Upstream repository owner
+            repo: Upstream repository name
+
+        Returns:
+            Clone URL of the fork (HTTPS)
+        """
+        resp = self._post(f"/repos/{owner}/{repo}/forks")
+        data = resp.json()
+        fork_url = data.get("clone_url", "")
+        fork_owner = data.get("owner", {}).get("login", "")
+        logger.info("Fork ready: %s/%s -> %s", owner, repo, fork_owner)
+
+        # GitHub may return 202 while the fork is still being created.
+        # Poll until the fork is accessible (up to ~30 s).
+        for _ in range(6):
+            try:
+                self._get(f"/repos/{fork_owner}/{repo}")
+                break
+            except requests.HTTPError:
+                time.sleep(5)
+
+        return fork_url
+
+    def sync_fork(self, owner: str, repo: str, branch: str) -> bool:
+        """Sync a fork's branch with its upstream parent.
+
+        Uses the GitHub "merge upstream" API so the fork's default
+        branch stays up-to-date before we branch off it.
+
+        Args:
+            owner: Fork owner (typically the bot user)
+            repo: Repository name
+            branch: Branch to sync (usually the default branch)
+
+        Returns:
+            True if the sync succeeded or was already up-to-date
+        """
+        try:
+            self._post(
+                f"/repos/{owner}/{repo}/merge-upstream",
+                json_body={"branch": branch},
+            )
+            logger.info("Fork %s/%s synced on branch %s", owner, repo, branch)
+            return True
+        except requests.HTTPError as exc:
+            # 409 means "already up to date" — that's fine.
+            if exc.response is not None and exc.response.status_code == 409:
+                logger.info("Fork %s/%s already up-to-date", owner, repo)
+                return True
+            logger.error("Fork sync failed: %s", exc)
+            return False
+
     def get_repo_default_branch(self, owner: str, repo: str) -> str:
         """Get the default branch of a repository.
 
