@@ -10,12 +10,15 @@ This module has NO business logic — it's a pure data-access layer.
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from stary.telemetry import record_jira_request
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +131,7 @@ class JiraAdapter:
             RuntimeError: On JSON parse errors
         """
         url = f"{self.base_url}{endpoint}"
+        t0 = time.monotonic()
         resp = self._session.request(
             method=method,
             url=url,
@@ -136,6 +140,7 @@ class JiraAdapter:
             json=json_body,
             timeout=self.timeout,
         )
+        record_jira_request(method, endpoint, resp.status_code, time.monotonic() - t0)
         if not resp.ok:
             logger.warning(
                 "Request failed: %s %s — HTTP %d: %.500s",

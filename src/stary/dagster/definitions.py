@@ -22,6 +22,7 @@ from stary.dagster.defs.sensors import (
     jira_retry_sensor,
     monitor_stary_failures,
 )
+from stary.telemetry import init_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ def create_definitions() -> Definitions:
     :returns: Dagster definitions
     """
     configure_logging()
+    init_telemetry()
     return Definitions(
         jobs=[stary_pipeline, stary_pipeline_with_markers],
         sensors=[jira_do_it_sensor, jira_pr_only_sensor, jira_retry_sensor, monitor_stary_failures],

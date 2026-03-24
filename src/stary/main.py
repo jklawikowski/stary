@@ -27,6 +27,7 @@ import sys
 import os
 from pathlib import Path
 from stary.orchestrator import Orchestrator
+from stary.telemetry import init_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ def _configure_logging() -> None:
 
 def main():
     _configure_logging()
+    init_telemetry()
     orch = Orchestrator(
         repo_path=os.environ.get("REPO_PATH"),
     )

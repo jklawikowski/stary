@@ -1,3 +1,6 @@
 dagster==1.12.3
 requests>=2.31.0
 github-copilot-sdk
+opentelemetry-api>=1.24.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-grpc>=1.24.0

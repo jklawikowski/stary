@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: qa-platform
+  labels:
+    app.kubernetes.io/instance: stary
+    app.kubernetes.io/name: stary
+    component: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: stary
+      app.kubernetes.io/name: stary
+      component: prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: stary
+        app.kubernetes.io/name: stary
+        component: prometheus
+    spec:
+      securityContext: {}
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.51.2
+        args:
+        - "--config.file=/etc/prometheus/prometheus.yml"
+        - "--storage.tsdb.path=/prometheus"
+        - "--storage.tsdb.retention.time=30d"
+        ports:
+        - containerPort: 9090
+          name: http
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: data
+          mountPath: /prometheus
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+            scheme: HTTP
+          periodSeconds: 20
+          timeoutSeconds: 10
+          failureThreshold: 3
+          successThreshold: 1
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: qa-platform
+  labels:
+    app.kubernetes.io/instance: stary
+    app.kubernetes.io/name: stary
+    component: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: stary
+    app.kubernetes.io/name: stary
+    component: prometheus
+  ports:
+  - name: http
+    port: 9090
+    targetPort: 9090
+    protocol: TCP

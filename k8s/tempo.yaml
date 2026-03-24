@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: qa-platform
+  labels:
+    app.kubernetes.io/instance: stary
+    app.kubernetes.io/name: stary
+    component: tempo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: stary
+      app.kubernetes.io/name: stary
+      component: tempo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: stary
+        app.kubernetes.io/name: stary
+        component: tempo
+    spec:
+      securityContext: {}
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.4.1
+        args: ["-config.file=/etc/tempo/tempo.yaml"]
+        ports:
+        - containerPort: 3200
+          name: http
+          protocol: TCP
+        - containerPort: 4317
+          name: otlp-grpc
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/tempo
+        - name: data
+          mountPath: /var/tempo
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+            scheme: HTTP
+          periodSeconds: 20
+          timeoutSeconds: 10
+          failureThreshold: 3
+          successThreshold: 1
+      volumes:
+      - name: config
+        configMap:
+          name: tempo-config
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: qa-platform
+  labels:
+    app.kubernetes.io/instance: stary
+    app.kubernetes.io/name: stary
+    component: tempo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: stary
+    app.kubernetes.io/name: stary
+    component: tempo
+  ports:
+  - name: http
+    port: 3200
+    targetPort: 3200
+    protocol: TCP
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+    protocol: TCP
