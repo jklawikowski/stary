@@ -275,6 +275,52 @@ class TriggerDetector:
             f'OR comment ~ "\\"{self.config.processed_marker}\\"") '
         )
 
+    def _build_scheduled_jql(self, users: list[str]) -> str:
+        """JQL for scheduled triggers — tickets assigned to or reported by given users.
+
+        Excludes tickets with existing trigger comments (handled by
+        comment-based sensors) and tickets already processed.
+        """
+        quoted = ", ".join(f'"{u}"' for u in users)
+        return (
+            self._base_jql()
+            + f'AND (assignee in ({quoted}) OR reporter in ({quoted})) '
+            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.trigger_comment}\\"" '
+            f'AND NOT comment ~ "\\"{self.config.trigger_pr_only}\\"" '
+        )
+
+    def poll_scheduled(
+        self,
+        users: list[str],
+        seen_keys: set[str] | None = None,
+    ) -> list[TriggeredTicket]:
+        """Query Jira for tickets assigned to / reported by *users*.
+
+        Returns tickets with ``auto_merge=False`` (PR-only).
+        """
+        if seen_keys is None:
+            seen_keys = set()
+        triggered: list[TriggeredTicket] = []
+
+        for issue in self.jira.search_issues(
+            self._build_scheduled_jql(users), fields=["key"], max_results=50,
+        ):
+            if issue.key in seen_keys:
+                continue
+            seen_keys.add(issue.key)
+            url = self.jira.build_browse_url(issue.key)
+            logger.info(
+                "Triggered: %s → %s (type=scheduled, auto_merge=False)",
+                issue.key, url,
+            )
+            triggered.append(
+                TriggeredTicket(key=issue.key, url=url, auto_merge=False)
+            )
+
+        return triggered
+
     def parse_trigger_type(
         self,
         comments: list[JiraComment],

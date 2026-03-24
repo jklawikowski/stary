@@ -7,6 +7,9 @@ Sensors:
     jira_do_it_sensor    – Polls Jira for "do it" triggered tickets
     jira_pr_only_sensor  – Polls Jira for "pull request" triggered tickets
     jira_retry_sensor    – Polls Jira for retry triggered tickets
+
+Schedules:
+    jira_scheduled_trigger – Runs twice daily for tickets assigned to / reported by configured users
 """
 
 import logging
@@ -16,7 +19,9 @@ from typing import Generator
 from dagster import (
     RunFailureSensorContext,
     RunRequest,
+    ScheduleEvaluationContext,
     run_failure_sensor,
+    schedule,
     sensor,
 )
 
@@ -156,6 +161,80 @@ def jira_retry_sensor() -> Generator:
     triggered = detector.poll_retry()
 
     yield from _yield_run_requests(triggered, jira_base_url)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled trigger (twice daily)
+# ---------------------------------------------------------------------------
+
+
+def _parse_schedule_users() -> list[str]:
+    """Parse STARY_SCHEDULE_USERS env var into a list of Jira usernames."""
+    raw = os.environ.get("STARY_SCHEDULE_USERS", "")
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
+@schedule(
+    job=stary_pipeline_with_markers,
+    cron_schedule="0 1,13 * * *",
+    execution_timezone="Europe/Warsaw",
+    name="jira_scheduled_trigger",
+    description=(
+        "Runs twice daily (01:00 and 13:00 Europe/Warsaw). "
+        "Queries Jira for tickets assigned to or reported by users "
+        "listed in STARY_SCHEDULE_USERS and triggers the pipeline "
+        "for each (auto_merge=False)."
+    ),
+)
+def jira_scheduled_trigger(context: ScheduleEvaluationContext) -> Generator:
+    """Dagster schedule for user-based Jira ticket processing."""
+    users = _parse_schedule_users()
+    if not users:
+        context.log.info("STARY_SCHEDULE_USERS is empty — skipping")
+        return
+
+    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
+    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+
+    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+    detector = TriggerDetector(jira, config=_build_trigger_config())
+    triggered = detector.poll_scheduled(users)
+
+    for ticket in triggered:
+        run_key = f"stary-scheduled-{ticket.key}-0"
+        run_config = {
+            "ops": {
+                "mark_ticket_wip": {
+                    "config": {
+                        "ticket_key": ticket.key,
+                        "jira_base_url": jira_base_url,
+                    }
+                },
+                "read_jira_ticket": {
+                    "config": {
+                        "ticket_url": ticket.url,
+                        "jira_base_url": jira_base_url,
+                    }
+                },
+                "review_code": {
+                    "config": {
+                        "auto_merge": False,
+                    }
+                },
+                "mark_ticket_done": {
+                    "config": {
+                        "ticket_key": ticket.key,
+                        "status": "COMPLETED",
+                        "jira_base_url": jira_base_url,
+                    }
+                },
+            }
+        }
+        yield RunRequest(
+            run_key=run_key,
+            run_config=run_config,
+            tags={"ticket_key": ticket.key, "trigger": "scheduled"},
+        )
 
 
 # ---------------------------------------------------------------------------
