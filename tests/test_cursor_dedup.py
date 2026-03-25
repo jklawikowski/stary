@@ -1,7 +1,10 @@
-"""Tests for cursor-based deduplication in Dagster sensors/schedules.
+"""Tests for cursor-based deduplication in Dagster sensors.
 
 Verifies that _load_cursor / _save_cursor helpers and sensor-level
 filtering prevent duplicate ticket processing across evaluation cycles.
+
+Updated for the unified stary_comment_sensor / stary_users_sensor
+architecture.
 """
 
 import json
@@ -75,12 +78,12 @@ class TestSaveCursor:
 
 
 # ---------------------------------------------------------------------------
-# Sensor-level deduplication (scheduled trigger)
+# Sensor-level deduplication (stary_users_sensor)
 # ---------------------------------------------------------------------------
 
 
-class TestScheduledTriggerCursor:
-    """Verify jira_users_trigger skips already-processed tickets."""
+class TestScheduledSensorCursor:
+    """Verify stary_users_sensor skips already-processed tickets."""
 
     @patch.dict("os.environ", {
         "STARY_SCHEDULE_USERS": "alice",
@@ -89,18 +92,18 @@ class TestScheduledTriggerCursor:
     })
     @patch("stary.dagster.defs.sensors.JiraAdapter")
     @patch("stary.dagster.defs.sensors.TriggerDetector")
-    def test_skips_ticket_already_in_cursor(self, MockDetector, MockJira):
-        from stary.sensor import TriggeredTicket
-
-        ticket = TriggeredTicket(key="PROJ-1", url="https://jira.example.com/browse/PROJ-1", auto_merge=False)
-        MockDetector.return_value.poll_scheduled.return_value = [ticket]
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_skips_ticket_already_in_cursor(self, MockValidator, MockDetector, MockJira):
+        MockDetector.return_value.poll_scheduled_candidates.return_value = [
+            ("PROJ-1", "https://jira.example.com/browse/PROJ-1"),
+        ]
 
         now = datetime.now(timezone.utc).isoformat()
         cursor = json.dumps({"PROJ-1": now})
 
-        from stary.dagster.defs.sensors import jira_users_trigger
+        from stary.dagster.defs.sensors import stary_users_sensor
         context = build_sensor_context(cursor=cursor)
-        result = jira_users_trigger.evaluate_tick(context)
+        result = stary_users_sensor.evaluate_tick(context)
 
         assert len(result.run_requests) == 0
         assert context.cursor is not None
@@ -112,45 +115,74 @@ class TestScheduledTriggerCursor:
     })
     @patch("stary.dagster.defs.sensors.JiraAdapter")
     @patch("stary.dagster.defs.sensors.TriggerDetector")
-    def test_processes_ticket_not_in_cursor(self, MockDetector, MockJira):
-        from stary.sensor import TriggeredTicket
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_processes_idle_ticket_not_in_cursor(self, MockValidator, MockDetector, MockJira):
+        MockDetector.return_value.poll_scheduled_candidates.return_value = [
+            ("PROJ-2", "https://jira.example.com/browse/PROJ-2"),
+        ]
+        MockJira.return_value.get_comments.return_value = []
+        MockValidator.return_value.resolve_scheduled.return_value = True
 
-        ticket = TriggeredTicket(key="PROJ-2", url="https://jira.example.com/browse/PROJ-2", auto_merge=False)
-        MockDetector.return_value.poll_scheduled.return_value = [ticket]
-
-        from stary.dagster.defs.sensors import jira_users_trigger
+        from stary.dagster.defs.sensors import stary_users_sensor
         context = build_sensor_context(cursor=None)
-        result = jira_users_trigger.evaluate_tick(context)
+        result = stary_users_sensor.evaluate_tick(context)
 
         assert len(result.run_requests) == 1
         assert result.run_requests[0].tags["ticket_key"] == "PROJ-2"
         saved = json.loads(context.cursor)
         assert "PROJ-2" in saved
 
+    @patch.dict("os.environ", {
+        "STARY_SCHEDULE_USERS": "alice",
+        "JIRA_BASE_URL": "https://jira.example.com",
+        "JIRA_TOKEN": "fake-token",
+    })
+    @patch("stary.dagster.defs.sensors.JiraAdapter")
+    @patch("stary.dagster.defs.sensors.TriggerDetector")
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_rejects_done_ticket(self, MockValidator, MockDetector, MockJira):
+        """Scheduled sensor rejects tickets already handled by stary."""
+        MockDetector.return_value.poll_scheduled_candidates.return_value = [
+            ("PROJ-3", "https://jira.example.com/browse/PROJ-3"),
+        ]
+        MockJira.return_value.get_comments.return_value = [
+            MagicMock(body="[~sys_qaplatformbot] stary:done"),
+        ]
+        MockValidator.return_value.resolve_scheduled.return_value = False
+
+        from stary.dagster.defs.sensors import stary_users_sensor
+        context = build_sensor_context(cursor=None)
+        result = stary_users_sensor.evaluate_tick(context)
+
+        assert len(result.run_requests) == 0
+        # Still added to cursor so we don't re-check
+        saved = json.loads(context.cursor)
+        assert "PROJ-3" in saved
+
 
 # ---------------------------------------------------------------------------
-# Sensor-level deduplication (do_it sensor)
+# Sensor-level deduplication (stary_comment_sensor)
 # ---------------------------------------------------------------------------
 
 
-class TestDoItSensorCursor:
+class TestCommentSensorCursor:
     @patch.dict("os.environ", {
         "JIRA_BASE_URL": "https://jira.example.com",
         "JIRA_TOKEN": "fake-token",
     })
     @patch("stary.dagster.defs.sensors.JiraAdapter")
     @patch("stary.dagster.defs.sensors.TriggerDetector")
-    def test_skips_ticket_in_cursor(self, MockDetector, MockJira):
-        from stary.sensor import TriggeredTicket
-
-        ticket = TriggeredTicket(key="PROJ-1", url="https://jira.example.com/browse/PROJ-1", auto_merge=True)
-        MockDetector.return_value.poll_do_it.return_value = [ticket]
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_skips_ticket_in_cursor(self, MockValidator, MockDetector, MockJira):
+        MockDetector.return_value.poll_comment_triggers.return_value = [
+            ("PROJ-1", "https://jira.example.com/browse/PROJ-1", "do_it"),
+        ]
 
         now = datetime.now(timezone.utc).isoformat()
 
-        from stary.dagster.defs.sensors import jira_do_it_sensor
+        from stary.dagster.defs.sensors import stary_comment_sensor
         context = build_sensor_context(cursor=json.dumps({"PROJ-1": now}))
-        result = jira_do_it_sensor.evaluate_tick(context)
+        result = stary_comment_sensor.evaluate_tick(context)
 
         assert len(result.run_requests) == 0
 
@@ -160,15 +192,17 @@ class TestDoItSensorCursor:
     })
     @patch("stary.dagster.defs.sensors.JiraAdapter")
     @patch("stary.dagster.defs.sensors.TriggerDetector")
-    def test_processes_new_ticket(self, MockDetector, MockJira):
-        from stary.sensor import TriggeredTicket
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_processes_new_do_it_ticket(self, MockValidator, MockDetector, MockJira):
+        MockDetector.return_value.poll_comment_triggers.return_value = [
+            ("PROJ-3", "https://jira.example.com/browse/PROJ-3", "do_it"),
+        ]
+        MockJira.return_value.get_comments.return_value = []
+        MockValidator.return_value.resolve_trigger.return_value = ("do_it", 0, True)
 
-        ticket = TriggeredTicket(key="PROJ-3", url="https://jira.example.com/browse/PROJ-3", auto_merge=True)
-        MockDetector.return_value.poll_do_it.return_value = [ticket]
-
-        from stary.dagster.defs.sensors import jira_do_it_sensor
+        from stary.dagster.defs.sensors import stary_comment_sensor
         context = build_sensor_context(cursor=None)
-        result = jira_do_it_sensor.evaluate_tick(context)
+        result = stary_comment_sensor.evaluate_tick(context)
 
         assert len(result.run_requests) == 1
         saved = json.loads(context.cursor)
@@ -176,31 +210,32 @@ class TestDoItSensorCursor:
 
 
 # ---------------------------------------------------------------------------
-# Retry sensor: allows same ticket with different retry_count
+# Retry sensor: allows same ticket with different retry_count (shared cursor)
 # ---------------------------------------------------------------------------
 
 
-class TestRetrySensorCursor:
+class TestRetryCursorInCommentSensor:
     @patch.dict("os.environ", {
         "JIRA_BASE_URL": "https://jira.example.com",
         "JIRA_TOKEN": "fake-token",
     })
     @patch("stary.dagster.defs.sensors.JiraAdapter")
     @patch("stary.dagster.defs.sensors.TriggerDetector")
-    def test_allows_same_ticket_new_retry_count(self, MockDetector, MockJira):
-        from stary.sensor import TriggeredTicket
-
-        # Ticket was already retried at count 1
-        ticket = TriggeredTicket(key="PROJ-1", url="https://jira.example.com/browse/PROJ-1", auto_merge=True, retry_count=2)
-        MockDetector.return_value.poll_retry.return_value = [ticket]
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_allows_same_ticket_new_retry_count(self, MockValidator, MockDetector, MockJira):
+        MockDetector.return_value.poll_comment_triggers.return_value = [
+            ("PROJ-1", "https://jira.example.com/browse/PROJ-1", "retry_candidate"),
+        ]
+        MockJira.return_value.get_comments.return_value = []
+        MockValidator.return_value.resolve_trigger.return_value = ("retry", 2, True)
 
         now = datetime.now(timezone.utc).isoformat()
 
-        from stary.dagster.defs.sensors import jira_retry_sensor
+        from stary.dagster.defs.sensors import stary_comment_sensor
         context = build_sensor_context(cursor=json.dumps({"PROJ-1-1": now}))
-        result = jira_retry_sensor.evaluate_tick(context)
+        result = stary_comment_sensor.evaluate_tick(context)
 
-        assert len(result.run_requests) == 1  # retry_count=2 is new, should process
+        assert len(result.run_requests) == 1
         saved = json.loads(context.cursor)
         assert "PROJ-1-2" in saved
 
@@ -210,16 +245,52 @@ class TestRetrySensorCursor:
     })
     @patch("stary.dagster.defs.sensors.JiraAdapter")
     @patch("stary.dagster.defs.sensors.TriggerDetector")
-    def test_skips_same_retry_count(self, MockDetector, MockJira):
-        from stary.sensor import TriggeredTicket
-
-        ticket = TriggeredTicket(key="PROJ-1", url="https://jira.example.com/browse/PROJ-1", auto_merge=True, retry_count=1)
-        MockDetector.return_value.poll_retry.return_value = [ticket]
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_skips_same_retry_count(self, MockValidator, MockDetector, MockJira):
+        MockDetector.return_value.poll_comment_triggers.return_value = [
+            ("PROJ-1", "https://jira.example.com/browse/PROJ-1", "retry_candidate"),
+        ]
+        MockJira.return_value.get_comments.return_value = []
+        MockValidator.return_value.resolve_trigger.return_value = ("retry", 1, True)
 
         now = datetime.now(timezone.utc).isoformat()
 
-        from stary.dagster.defs.sensors import jira_retry_sensor
+        from stary.dagster.defs.sensors import stary_comment_sensor
         context = build_sensor_context(cursor=json.dumps({"PROJ-1-1": now}))
-        result = jira_retry_sensor.evaluate_tick(context)
+        result = stary_comment_sensor.evaluate_tick(context)
+
+        assert len(result.run_requests) == 0
+
+
+# ---------------------------------------------------------------------------
+# Cross-trigger dedup (ticket in both do_it and scheduled)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossTriggerDedup:
+    """Verify that a ticket handled by comment sensor is skipped by scheduled."""
+
+    @patch.dict("os.environ", {
+        "STARY_SCHEDULE_USERS": "alice",
+        "JIRA_BASE_URL": "https://jira.example.com",
+        "JIRA_TOKEN": "fake-token",
+    })
+    @patch("stary.dagster.defs.sensors.JiraAdapter")
+    @patch("stary.dagster.defs.sensors.TriggerDetector")
+    @patch("stary.dagster.defs.sensors.TicketStateValidator")
+    def test_scheduled_rejects_ticket_with_stary_markers(self, MockValidator, MockDetector, MockJira):
+        """Even if cursor is empty, scheduled sensor checks comments."""
+        MockDetector.return_value.poll_scheduled_candidates.return_value = [
+            ("PROJ-1", "https://jira.example.com/browse/PROJ-1"),
+        ]
+        MockJira.return_value.get_comments.return_value = [
+            MagicMock(body="[~sys_qaplatformbot] stary:wip"),
+            MagicMock(body="[~sys_qaplatformbot] stary:done"),
+        ]
+        MockValidator.return_value.resolve_scheduled.return_value = False
+
+        from stary.dagster.defs.sensors import stary_users_sensor
+        context = build_sensor_context(cursor=None)
+        result = stary_users_sensor.evaluate_tick(context)
 
         assert len(result.run_requests) == 0

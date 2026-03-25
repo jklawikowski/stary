@@ -17,11 +17,9 @@ from dagster import Definitions
 
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
 from stary.dagster.defs.sensors import (
-    jira_do_it_sensor,
-    jira_pr_only_sensor,
-    jira_retry_sensor,
-    jira_users_trigger,
     monitor_stary_failures,
+    stary_comment_sensor,
+    stary_users_sensor,
 )
 from stary.telemetry import init_telemetry
 
@@ -64,7 +62,7 @@ def create_definitions() -> Definitions:
     init_telemetry()
     return Definitions(
         jobs=[stary_pipeline, stary_pipeline_with_markers],
-        sensors=[jira_do_it_sensor, jira_pr_only_sensor, jira_retry_sensor, jira_users_trigger, monitor_stary_failures],
+        sensors=[stary_comment_sensor, stary_users_sensor, monitor_stary_failures],
     )
 
 

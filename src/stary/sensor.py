@@ -1,17 +1,22 @@
-"""Trigger detection for Jira tickets.
+"""Trigger detection and ticket state validation for Jira tickets.
 
 Detects tickets that have been triggered for processing based on
 specific comment markers. Uses JiraAdapter for API operations.
 
-This module focuses on trigger detection logic. Status marking is
-handled by TicketStatusMarker in ticket_status.py.
+This module focuses on:
+- Trigger detection logic (TriggerDetector)
+- Ticket state validation from comment history (TicketStateValidator)
+
+Status marking is handled by TicketStatusMarker in ticket_status.py.
 
 The trigger user is the faceless/service account ``sys_qaplatformbot``,
 used for production automation.
 """
 
 import logging
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Protocol
 
 from stary.jira_adapter import JiraComment
@@ -23,6 +28,7 @@ from stary.ticket_status import (
     DEFAULT_RETRY_MARKER,
     DEFAULT_WIP_MARKER,
     MAX_RETRY_COUNT,
+    TicketState,
 )
 
 # ---------------------------------------------------------------------------
@@ -409,5 +415,286 @@ class TriggerDetector:
 
         # Retry must be newer (higher index) than the last terminal marker
         return last_retry_idx > last_terminal_idx
+
+    # ------------------------------------------------------------------
+    # Combined polling (for unified comment sensor)
+    # ------------------------------------------------------------------
+
+    def poll_comment_triggers(
+        self,
+    ) -> list[tuple[str, str, str]]:
+        """Run 3 JQL queries and return deduplicated candidate tickets.
+
+        Returns a list of ``(ticket_key, ticket_url, trigger_hint)`` tuples.
+        ``trigger_hint`` is "do_it", "pr_only", or "retry_candidate" based
+        on which JQL matched.  Deduplication by ticket key ensures a ticket
+        appears at most once.  Retry is checked first so that a ticket with
+        both an old trigger comment and a newer retry always gets the
+        ``retry_candidate`` hint.
+        """
+        logger.info("Querying Jira for comment-triggered tickets (3 queries)")
+        candidates: list[tuple[str, str, str]] = []
+        seen_keys: set[str] = set()
+
+        # retry (highest priority – a retry supersedes old trigger comments)
+        for issue in self.jira.search_issues(
+            self._build_retry_jql(), fields=["key"], max_results=50,
+        ):
+            if issue.key not in seen_keys:
+                seen_keys.add(issue.key)
+                url = self.jira.build_browse_url(issue.key)
+                candidates.append((issue.key, url, "retry_candidate"))
+
+        # do_it
+        for issue in self.jira.search_issues(
+            self._build_do_it_jql(), fields=["key"], max_results=50,
+        ):
+            if issue.key not in seen_keys:
+                seen_keys.add(issue.key)
+                url = self.jira.build_browse_url(issue.key)
+                candidates.append((issue.key, url, "do_it"))
+
+        # pr_only
+        for issue in self.jira.search_issues(
+            self._build_pr_only_jql(), fields=["key"], max_results=50,
+        ):
+            if issue.key not in seen_keys:
+                seen_keys.add(issue.key)
+                url = self.jira.build_browse_url(issue.key)
+                candidates.append((issue.key, url, "pr_only"))
+
+        logger.info("%d unique candidate(s) from 3 queries", len(candidates))
+        return candidates
+
+    def poll_scheduled_candidates(
+        self,
+        users: list[str],
+    ) -> list[tuple[str, str]]:
+        """Run the scheduled JQL query and return candidate tickets.
+
+        Returns a list of ``(ticket_key, ticket_url)`` tuples.
+        """
+        candidates: list[tuple[str, str]] = []
+        for issue in self.jira.search_issues(
+            self._build_scheduled_jql(users), fields=["key"], max_results=50,
+        ):
+            url = self.jira.build_browse_url(issue.key)
+            candidates.append((issue.key, url))
+        return candidates
+
+
+# ---------------------------------------------------------------------------
+# Default WIP staleness threshold
+# ---------------------------------------------------------------------------
+DEFAULT_WIP_STALE_HOURS = int(os.environ.get("STARY_WIP_STALE_HOURS", "3"))
+
+
+# ---------------------------------------------------------------------------
+# Ticket State Validator
+# ---------------------------------------------------------------------------
+
+
+class TicketStateValidator:
+    """Validates ticket eligibility by inspecting Jira comment history.
+
+    Comments are the ground truth for ticket state. The cursor is only
+    an optimization layer to avoid unnecessary comment fetches.
+    """
+
+    def __init__(self, config: TriggerConfig | None = None):
+        self.config = config or TriggerConfig()
+
+    def determine_state(
+        self,
+        comments: list[JiraComment],
+        wip_stale_hours: int = DEFAULT_WIP_STALE_HOURS,
+    ) -> TicketState:
+        """Derive the ticket state from its comment history.
+
+        Scans comments in order (oldest → newest) and tracks the last
+        marker of each type.  The latest marker determines the state.
+        """
+        last_wip_idx = -1
+        last_done_idx = -1
+        last_failed_idx = -1
+        last_wip_created: str | None = None
+
+        for idx, c in enumerate(comments):
+            if self.config.wip_marker in c.body:
+                last_wip_idx = idx
+                last_wip_created = c.created
+            if self.config.processed_marker in c.body:
+                last_done_idx = idx
+            if self.config.failed_marker in c.body:
+                last_failed_idx = idx
+
+        last_terminal_idx = max(last_done_idx, last_failed_idx)
+
+        # No stary markers at all → IDLE
+        if last_wip_idx == -1 and last_terminal_idx == -1:
+            return TicketState.IDLE
+
+        # Terminal marker is the latest → DONE or FAILED
+        if last_terminal_idx > last_wip_idx:
+            if last_done_idx >= last_failed_idx:
+                return TicketState.DONE
+            return TicketState.FAILED
+
+        # WIP is the latest marker (no terminal after it)
+        if last_wip_idx > last_terminal_idx:
+            if self._is_wip_stale(last_wip_created, wip_stale_hours):
+                return TicketState.WIP_STALE
+            return TicketState.WIP
+
+        return TicketState.IDLE
+
+    def is_eligible(
+        self,
+        state: TicketState,
+        trigger_type: str,
+    ) -> bool:
+        """Check if a ticket in the given state can be triggered.
+
+        Uses the eligibility matrix:
+        - IDLE:      do_it ✓, pr_only ✓, retry ✗, scheduled ✓
+        - WIP:       all ✗
+        - WIP_STALE: do_it ✓, pr_only ✓, retry ✗, scheduled ✗
+        - DONE:      retry ✓ (if valid), rest ✗
+        - FAILED:    retry ✓ (if valid), rest ✗
+        """
+        matrix = {
+            TicketState.IDLE: {"do_it", "pr_only", "scheduled"},
+            TicketState.WIP: set(),
+            TicketState.WIP_STALE: {"do_it", "pr_only"},
+            TicketState.DONE: {"retry"},
+            TicketState.FAILED: {"retry"},
+        }
+        return trigger_type in matrix.get(state, set())
+
+    def resolve_trigger(
+        self,
+        comments: list[JiraComment],
+        trigger_hint: str,
+    ) -> tuple[str | None, int, bool]:
+        """Resolve the actual trigger type, retry count, and auto_merge.
+
+        Args:
+            comments: Full comment list for the ticket
+            trigger_hint: Which JQL matched ("do_it", "pr_only", "retry_candidate")
+
+        Returns:
+            (trigger_type, retry_count, auto_merge) or (None, 0, False) if invalid.
+        """
+        state = self.determine_state(comments)
+
+        if trigger_hint == "retry_candidate":
+            return self._resolve_retry(comments, state)
+
+        if trigger_hint == "do_it":
+            if self.is_eligible(state, "do_it"):
+                return "do_it", 0, True
+            return None, 0, False
+
+        if trigger_hint == "pr_only":
+            if self.is_eligible(state, "pr_only"):
+                return "pr_only", 0, False
+            return None, 0, False
+
+        return None, 0, False
+
+    def resolve_scheduled(
+        self,
+        comments: list[JiraComment],
+    ) -> bool:
+        """Check if a ticket is eligible for scheduled processing.
+
+        A ticket is eligible only if it has NEVER been touched by stary
+        (no wip, done, or failed markers exist at all).
+        """
+        state = self.determine_state(comments)
+        return self.is_eligible(state, "scheduled")
+
+    def _resolve_retry(
+        self,
+        comments: list[JiraComment],
+        state: TicketState,
+    ) -> tuple[str | None, int, bool]:
+        """Validate and resolve a retry trigger."""
+        if not self.is_eligible(state, "retry"):
+            return None, 0, False
+
+        retry_count = sum(
+            1 for c in comments if self.config.trigger_retry in c.body
+        )
+        if retry_count > self.config.max_retry_count:
+            return None, 0, False
+
+        if not self._is_retry_newer_than_terminal(comments):
+            return None, 0, False
+
+        auto_merge = self._resolve_retry_auto_merge(comments)
+        return "retry", retry_count, auto_merge
+
+    def _resolve_retry_auto_merge(
+        self,
+        comments: list[JiraComment],
+    ) -> bool:
+        """Determine auto_merge for retry by looking at the original trigger.
+
+        Scans comments before the last terminal marker to find whether
+        the original trigger was "do it" (auto_merge=True) or
+        "pull request" (auto_merge=False).
+        """
+        # Find the last terminal marker index
+        last_terminal_idx = -1
+        for idx, c in enumerate(comments):
+            if (self.config.processed_marker in c.body
+                    or self.config.failed_marker in c.body):
+                last_terminal_idx = idx
+
+        # Scan backwards from terminal to find the most recent original trigger
+        for idx in range(last_terminal_idx - 1, -1, -1):
+            body = comments[idx].body
+            if self.config.trigger_comment in body:
+                return True   # "do it" → auto_merge
+            if self.config.trigger_pr_only in body:
+                return False  # "pull request" → no auto_merge
+
+        # No original trigger found → default to True
+        return True
+
+    def _is_retry_newer_than_terminal(
+        self,
+        comments: list[JiraComment],
+    ) -> bool:
+        """Check if the most recent retry comment is newer than the last terminal."""
+        last_retry_idx = -1
+        last_terminal_idx = -1
+
+        for idx, c in enumerate(comments):
+            if self.config.trigger_retry in c.body:
+                last_retry_idx = idx
+            if (self.config.failed_marker in c.body
+                    or self.config.processed_marker in c.body):
+                last_terminal_idx = idx
+
+        return last_retry_idx > last_terminal_idx
+
+    @staticmethod
+    def _is_wip_stale(
+        wip_created: str | None,
+        stale_hours: int,
+    ) -> bool:
+        """Check if a WIP marker is older than the staleness threshold."""
+        if not wip_created:
+            return False
+        try:
+            wip_time = datetime.fromisoformat(wip_created)
+            if wip_time.tzinfo is None:
+                wip_time = wip_time.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - wip_time).total_seconds() / 3600
+            return age_hours > stale_hours
+        except (ValueError, TypeError):
+            return False
 
 

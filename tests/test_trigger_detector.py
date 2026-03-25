@@ -305,3 +305,77 @@ class TestJqlQueries:
             detector._build_retry_jql(),
         ):
             assert "labels" not in jql
+
+
+# ---------------------------------------------------------------------------
+# poll_comment_triggers (unified method)
+# ---------------------------------------------------------------------------
+
+
+class TestPollCommentTriggers:
+    def test_returns_deduplicated_candidates(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="PROJ-3")],   # retry
+            [JiraIssue(key="PROJ-1")],   # do_it
+            [JiraIssue(key="PROJ-1"), JiraIssue(key="PROJ-2")],  # pr_only (PROJ-1 dup)
+        ]
+
+        candidates = detector.poll_comment_triggers()
+
+        keys = [c[0] for c in candidates]
+        assert keys == ["PROJ-3", "PROJ-1", "PROJ-2"]
+
+    def test_retry_has_priority_over_do_it_and_pr_only(self):
+        """If same ticket in retry and pr_only JQL, hint should be retry_candidate."""
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="PROJ-1")],   # retry
+            [JiraIssue(key="PROJ-1")],   # do_it
+            [JiraIssue(key="PROJ-1")],   # pr_only
+        ]
+
+        candidates = detector.poll_comment_triggers()
+
+        assert len(candidates) == 1
+        assert candidates[0] == ("PROJ-1", "https://jira.example.com/browse/PROJ-1", "retry_candidate")
+
+    def test_assigns_correct_hints(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="C-1")],
+            [JiraIssue(key="A-1")],
+            [JiraIssue(key="B-1")],
+        ]
+
+        candidates = detector.poll_comment_triggers()
+
+        hints = {c[0]: c[2] for c in candidates}
+        assert hints["C-1"] == "retry_candidate"
+        assert hints["A-1"] == "do_it"
+        assert hints["B-1"] == "pr_only"
+
+    def test_three_jql_calls(self):
+        detector, jira = _make_detector()
+        jira.search_issues.return_value = []
+
+        detector.poll_comment_triggers()
+
+        assert jira.search_issues.call_count == 3
+
+    def test_no_comment_fetches(self):
+        """poll_comment_triggers doesn't fetch comments — that's the sensor's job."""
+        detector, jira = _make_detector()
+        jira.search_issues.return_value = []
+
+        detector.poll_comment_triggers()
+
+        jira.get_comments.assert_not_called()
+
+    def test_empty_result(self):
+        detector, jira = _make_detector()
+        jira.search_issues.return_value = []
+
+        candidates = detector.poll_comment_triggers()
+
+        assert candidates == []

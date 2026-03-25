@@ -1,15 +1,9 @@
 """Dagster sensors for the Stary agent pipeline.
 
-Mirrors the pattern from the qa-platform orchestrator
-(src/vistula/dagster/defs/sensors.py).
-
 Sensors:
-    jira_do_it_sensor    – Polls Jira for "do it" triggered tickets
-    jira_pr_only_sensor  – Polls Jira for "pull request" triggered tickets
-    jira_retry_sensor    – Polls Jira for retry triggered tickets
-
-Schedules:
-    jira_users_trigger – Polls for tickets assigned to / reported by configured users
+    stary_comment_sensor     – Unified sensor for do_it + pr_only + retry triggers
+    stary_users_sensor        – Polls for tickets assigned to / reported by configured users
+    monitor_stary_failures   – Monitors pipeline failures and posts to Jira
 """
 
 import json
@@ -29,7 +23,7 @@ from dagster import (
 from stary.config import build_dagster_run_url, get_dagster_base_url
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
 from stary.jira_adapter import JiraAdapter
-from stary.sensor import TriggerConfig, TriggerDetector, TriggeredTicket
+from stary.sensor import TriggerConfig, TriggerDetector, TicketStateValidator, TriggeredTicket
 
 logger = logging.getLogger(__name__)
 
@@ -120,113 +114,93 @@ def _yield_run_requests(
         yield RunRequest(
             run_key=run_key,
             run_config=run_config,
-            tags={"ticket_key": ticket_key, "retry_count": str(retry_count)},
+            tags={
+                "ticket_key": ticket_key,
+                "retry_count": str(retry_count),
+                "trigger_type": "retry" if retry_count > 0 else "comment",
+            },
         )
 
 
 # ---------------------------------------------------------------------------
-# Jira ticket sensors (split by trigger type)
+# Unified comment-triggered sensor (replaces do_it + pr_only + retry)
 # ---------------------------------------------------------------------------
 
 @sensor(
     job=stary_pipeline_with_markers,
-    name="jira_do_it_sensor",
-    minimum_interval_seconds=1800,
+    name="stary_comment_sensor",
+    minimum_interval_seconds=60,
     description=(
-        "Polls Jira for tickets with the 'do it' trigger comment. "
-        "Yields a RunRequest for each triggered ticket (auto_merge=True)."
+        "Unified sensor for do_it, pr_only, and retry triggers. "
+        "Runs 3 separate JQL queries, deduplicates candidates, "
+        "validates ticket state via comment history, and yields "
+        "RunRequests for eligible tickets."
     ),
 )
-def jira_do_it_sensor(context: SensorEvaluationContext) -> Generator:
-    """Dagster sensor for 'do it' triggers."""
+def stary_comment_sensor(context: SensorEvaluationContext) -> Generator:
+    """Unified Dagster sensor for comment-based triggers."""
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
 
     jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    detector = TriggerDetector(jira, config=_build_trigger_config())
-    triggered = detector.poll_do_it()
+    config = _build_trigger_config()
+    detector = TriggerDetector(jira, config=config)
+    validator = TicketStateValidator(config=config)
 
+    # Run 3 JQL queries, deduplicated
+    candidates = detector.poll_comment_triggers()
+
+    # Load shared cursor
     processed = _load_cursor(context.cursor)
     now = datetime.now(timezone.utc).isoformat()
-    new_triggered = []
-    for t in triggered:
-        if t.key in processed:
-            logger.info("Skipping %s (already processed at %s)", t.key, processed[t.key])
+
+    new_triggered: list[TriggeredTicket] = []
+
+    for ticket_key, ticket_url, trigger_hint in candidates:
+        # Cursor optimization: skip recently processed (non-retry)
+        if trigger_hint != "retry_candidate" and ticket_key in processed:
+            logger.info("Skipping %s (cursor hit at %s)", ticket_key, processed[ticket_key])
             continue
-        processed[t.key] = now
-        new_triggered.append(t)
 
-    context.update_cursor(_save_cursor(processed))
-    yield from _yield_run_requests(new_triggered, jira_base_url)
+        # Fetch comments and validate state
+        comments = jira.get_comments(ticket_key)
+        trigger_type, retry_count, auto_merge = validator.resolve_trigger(
+            comments, trigger_hint,
+        )
 
-
-@sensor(
-    job=stary_pipeline_with_markers,
-    name="jira_pr_only_sensor",
-    minimum_interval_seconds=1800,
-    description=(
-        "Polls Jira for tickets with the 'pull request' trigger comment. "
-        "Yields a RunRequest for each triggered ticket (auto_merge=False)."
-    ),
-)
-def jira_pr_only_sensor(context: SensorEvaluationContext) -> Generator:
-    """Dagster sensor for 'pull request' triggers."""
-    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
-    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
-
-    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    detector = TriggerDetector(jira, config=_build_trigger_config())
-    triggered = detector.poll_pr_only()
-
-    processed = _load_cursor(context.cursor)
-    now = datetime.now(timezone.utc).isoformat()
-    new_triggered = []
-    for t in triggered:
-        if t.key in processed:
-            logger.info("Skipping %s (already processed at %s)", t.key, processed[t.key])
+        if trigger_type is None:
+            logger.info(
+                "%s: not eligible (hint=%s, state determined from comments)",
+                ticket_key, trigger_hint,
+            )
             continue
-        processed[t.key] = now
-        new_triggered.append(t)
 
-    context.update_cursor(_save_cursor(processed))
-    yield from _yield_run_requests(new_triggered, jira_base_url)
-
-
-@sensor(
-    job=stary_pipeline_with_markers,
-    name="jira_retry_sensor",
-    minimum_interval_seconds=3600,
-    description=(
-        "Polls Jira for tickets with the 'retry' trigger comment. "
-        "Yields a RunRequest for each triggered ticket after validating retry count."
-    ),
-)
-def jira_retry_sensor(context: SensorEvaluationContext) -> Generator:
-    """Dagster sensor for 'retry' triggers."""
-    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
-    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
-
-    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    detector = TriggerDetector(jira, config=_build_trigger_config())
-    triggered = detector.poll_retry()
-
-    processed = _load_cursor(context.cursor)
-    now = datetime.now(timezone.utc).isoformat()
-    new_triggered = []
-    for t in triggered:
-        cursor_key = f"{t.key}-{t.retry_count}"
+        # For retry, check cursor with retry-count key
+        cursor_key = f"{ticket_key}-{retry_count}" if trigger_type == "retry" else ticket_key
         if cursor_key in processed:
-            logger.info("Skipping %s retry %d (already processed at %s)", t.key, t.retry_count, processed[cursor_key])
+            logger.info("Skipping %s (cursor key %s hit)", ticket_key, cursor_key)
             continue
+
+        logger.info(
+            "Triggered: %s (type=%s, retry=%d, auto_merge=%s)",
+            ticket_key, trigger_type, retry_count, auto_merge,
+        )
         processed[cursor_key] = now
-        new_triggered.append(t)
+        new_triggered.append(
+            TriggeredTicket(
+                key=ticket_key,
+                url=ticket_url,
+                auto_merge=auto_merge,
+                retry_count=retry_count,
+            )
+        )
 
     context.update_cursor(_save_cursor(processed))
     yield from _yield_run_requests(new_triggered, jira_base_url)
 
 
 # ---------------------------------------------------------------------------
-# Scheduled trigger (runs every 6 hours, cursor-based dedup)
+# Scheduled trigger (for tickets by user, rejects any stary-touched tickets)
 # ---------------------------------------------------------------------------
 
 
@@ -238,16 +212,16 @@ def _parse_schedule_users() -> list[str]:
 
 @sensor(
     job=stary_pipeline_with_markers,
-    name="jira_users_trigger",
-    minimum_interval_seconds=21600,
+    name="stary_users_sensor",
+    minimum_interval_seconds=60,
     description=(
         "Polls Jira every ~6 hours for tickets assigned to or reported "
-        "by users listed in STARY_SCHEDULE_USERS and triggers the "
-        "pipeline for each (auto_merge=False)."
+        "by users listed in STARY_SCHEDULE_USERS. Only processes tickets "
+        "that have NEVER been touched by stary (no wip/done/failed markers)."
     ),
 )
-def jira_users_trigger(context: SensorEvaluationContext) -> Generator:
-    """Dagster sensor for user-based Jira ticket processing."""
+def stary_users_sensor(context: SensorEvaluationContext) -> Generator:
+    """Dagster sensor for user-based automatic ticket discovery."""
     users = _parse_schedule_users()
     if not users:
         logger.info("STARY_SCHEDULE_USERS is empty — skipping")
@@ -257,56 +231,42 @@ def jira_users_trigger(context: SensorEvaluationContext) -> Generator:
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
 
     jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    detector = TriggerDetector(jira, config=_build_trigger_config())
-    triggered = detector.poll_scheduled(users)
+    config = _build_trigger_config()
+    detector = TriggerDetector(jira, config=config)
+    validator = TicketStateValidator(config=config)
+
+    candidates = detector.poll_scheduled_candidates(users)
 
     processed = _load_cursor(context.cursor)
     now = datetime.now(timezone.utc).isoformat()
-    new_triggered = []
-    for t in triggered:
-        if t.key in processed:
-            logger.info("Skipping %s (already processed at %s)", t.key, processed[t.key])
+
+    new_triggered: list[TriggeredTicket] = []
+
+    for ticket_key, ticket_url in candidates:
+        if ticket_key in processed:
+            logger.info("Skipping %s (cursor hit at %s)", ticket_key, processed[ticket_key])
             continue
-        processed[t.key] = now
-        new_triggered.append(t)
+
+        # Fetch comments and verify ticket was never touched by stary
+        comments = jira.get_comments(ticket_key)
+        if not validator.resolve_scheduled(comments):
+            logger.info("%s: already handled by stary, skipping", ticket_key)
+            # Still add to cursor so we don't re-fetch comments next time
+            processed[ticket_key] = now
+            continue
+
+        logger.info("Triggered: %s (type=scheduled, auto_merge=False)", ticket_key)
+        processed[ticket_key] = now
+        new_triggered.append(
+            TriggeredTicket(
+                key=ticket_key,
+                url=ticket_url,
+                auto_merge=False,
+            )
+        )
 
     context.update_cursor(_save_cursor(processed))
-
-    for ticket in new_triggered:
-        run_key = f"stary-scheduled-{ticket.key}-0"
-        run_config = {
-            "ops": {
-                "mark_ticket_wip": {
-                    "config": {
-                        "ticket_key": ticket.key,
-                        "jira_base_url": jira_base_url,
-                    }
-                },
-                "read_jira_ticket": {
-                    "config": {
-                        "ticket_url": ticket.url,
-                        "jira_base_url": jira_base_url,
-                    }
-                },
-                "review_code": {
-                    "config": {
-                        "auto_merge": False,
-                    }
-                },
-                "mark_ticket_done": {
-                    "config": {
-                        "ticket_key": ticket.key,
-                        "status": "COMPLETED",
-                        "jira_base_url": jira_base_url,
-                    }
-                },
-            }
-        }
-        yield RunRequest(
-            run_key=run_key,
-            run_config=run_config,
-            tags={"ticket_key": ticket.key, "trigger": "scheduled"},
-        )
+    yield from _yield_run_requests(new_triggered, jira_base_url)
 
 
 # ---------------------------------------------------------------------------

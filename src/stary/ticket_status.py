@@ -12,6 +12,7 @@ The marker comments use the faceless/service account
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,24 @@ DEFAULT_RETRY_MARKER = "[~sys_qaplatformbot] retry"
 
 # Maximum number of retry attempts allowed per ticket
 MAX_RETRY_COUNT = 3
+
+
+# ---------------------------------------------------------------------------
+# Ticket state (derived from comment history)
+# ---------------------------------------------------------------------------
+
+
+class TicketState(Enum):
+    """State of a ticket derived from its Jira comment markers.
+
+    Ground truth is the comment history — NOT a volatile cursor.
+    """
+
+    IDLE = "idle"              # No stary markers at all
+    WIP = "wip"                # stary:wip posted, no terminal after
+    WIP_STALE = "wip_stale"    # stary:wip with no terminal, older than threshold
+    DONE = "done"              # stary:done is the latest terminal marker
+    FAILED = "failed"          # stary:failed is the latest terminal marker
 
 
 # ---------------------------------------------------------------------------
