@@ -221,19 +221,15 @@ class TestApiCallCount:
 
 
 class TestJqlQueries:
-    def test_do_it_jql_excludes_failed_and_done_markers(self):
+    def test_do_it_jql_contains_trigger(self):
         detector, _ = _make_detector()
         jql = detector._build_do_it_jql()
         assert "do it" in jql
-        assert "stary:failed" in jql
-        assert "stary:done" in jql
 
-    def test_pr_only_jql_excludes_failed_and_done_markers(self):
+    def test_pr_only_jql_contains_trigger(self):
         detector, _ = _make_detector()
         jql = detector._build_pr_only_jql()
         assert "pull request" in jql
-        assert "stary:failed" in jql
-        assert "stary:done" in jql
 
     def test_retry_jql_requires_terminal_marker(self):
         detector, _ = _make_detector()
@@ -241,6 +237,23 @@ class TestJqlQueries:
         assert "retry" in jql
         assert "stary:failed" in jql
         assert "stary:done" in jql
+
+    def test_do_it_jql_has_no_NOT_comment(self):
+        """NOT comment ~ is broken on Jira Server; cursor handles dedup."""
+        detector, _ = _make_detector()
+        jql = detector._build_do_it_jql()
+        assert "NOT comment" not in jql
+
+    def test_pr_only_jql_has_no_NOT_comment(self):
+        detector, _ = _make_detector()
+        jql = detector._build_pr_only_jql()
+        assert "NOT comment" not in jql
+
+    def test_scheduled_jql_has_no_NOT_comment(self):
+        detector, _ = _make_detector()
+        jql = detector._build_scheduled_jql(["alice"])
+        assert "NOT comment" not in jql
+        assert "alice" in jql
 
     def test_all_queries_filter_by_updated_span(self):
         detector, _ = _make_detector()

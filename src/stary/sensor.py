@@ -234,7 +234,13 @@ class TriggerDetector:
         return triggered
 
     def _base_jql(self) -> str:
-        """Common JQL predicates shared by all trigger queries."""
+        """Common JQL predicates shared by all trigger queries.
+
+        NOTE: ``NOT comment ~`` is intentionally omitted.  Jira Server's
+        full-text search does not reliably honour negated comment
+        searches (verified empirically).  Deduplication is handled by
+        cursor-based tracking in the Dagster sensor layer.
+        """
         if self.config.jira_labels:
             quoted = ', '.join(f'"{l}"' for l in self.config.jira_labels)
             labels_clause = f'labels in ({quoted}) AND '
@@ -244,26 +250,20 @@ class TriggerDetector:
             f'{labels_clause}'
             'status != Closed AND status != Done AND status != Resolved '
             f'AND updated >= -{self.config.query_span_days}d '
-            f'AND NOT comment ~ "\\"{self.config.wip_marker}\\"" '
-
         )
 
     def _build_do_it_jql(self) -> str:
-        """JQL for "do it" triggers (excludes failed and done tickets)."""
+        """JQL for \"do it\" triggers."""
         return (
             self._base_jql()
             + f'AND comment ~ "\\"{self.config.trigger_comment}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
         )
 
     def _build_pr_only_jql(self) -> str:
-        """JQL for "pull request" triggers (excludes failed and done tickets)."""
+        """JQL for \"pull request\" triggers."""
         return (
             self._base_jql()
             + f'AND comment ~ "\\"{self.config.trigger_pr_only}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
         )
 
     def _build_retry_jql(self) -> str:
@@ -276,19 +276,11 @@ class TriggerDetector:
         )
 
     def _build_scheduled_jql(self, users: list[str]) -> str:
-        """JQL for scheduled triggers — tickets assigned to or reported by given users.
-
-        Excludes tickets with existing trigger comments (handled by
-        comment-based sensors) and tickets already processed.
-        """
+        """JQL for scheduled triggers — tickets assigned to or reported by given users."""
         quoted = ", ".join(f'"{u}"' for u in users)
         return (
             self._base_jql()
             + f'AND (assignee in ({quoted}) OR reporter in ({quoted})) '
-            f'AND NOT comment ~ "\\"{self.config.failed_marker}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.processed_marker}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.trigger_comment}\\"" '
-            f'AND NOT comment ~ "\\"{self.config.trigger_pr_only}\\"" '
         )
 
     def poll_scheduled(

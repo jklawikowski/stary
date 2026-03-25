@@ -9,19 +9,20 @@ Sensors:
     jira_retry_sensor    – Polls Jira for retry triggered tickets
 
 Schedules:
-    jira_scheduled_trigger – Runs twice daily for tickets assigned to / reported by configured users
+    jira_users_trigger – Polls for tickets assigned to / reported by configured users
 """
 
+import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Generator
 
 from dagster import (
     RunFailureSensorContext,
     RunRequest,
-    ScheduleEvaluationContext,
+    SensorEvaluationContext,
     run_failure_sensor,
-    schedule,
     sensor,
 )
 
@@ -37,6 +38,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com")
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
+
+
+# ---------------------------------------------------------------------------
+# Cursor helpers – persist processed ticket keys across evaluations
+# ---------------------------------------------------------------------------
+CURSOR_RETENTION_DAYS = 7
+
+
+def _load_cursor(
+    cursor_raw: str | None,
+) -> dict[str, str]:
+    """Deserialize the cursor JSON and prune entries older than retention."""
+    if not cursor_raw:
+        return {}
+    try:
+        data: dict[str, str] = json.loads(cursor_raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=CURSOR_RETENTION_DAYS)).isoformat()
+    return {k: v for k, v in data.items() if v > cutoff}
+
+
+def _save_cursor(
+    processed: dict[str, str],
+) -> str:
+    """Serialize the processed-tickets dict to a cursor string."""
+    return json.dumps(processed)
 
 
 def _build_trigger_config() -> TriggerConfig:
@@ -109,7 +137,7 @@ def _yield_run_requests(
         "Yields a RunRequest for each triggered ticket (auto_merge=True)."
     ),
 )
-def jira_do_it_sensor() -> Generator:
+def jira_do_it_sensor(context: SensorEvaluationContext) -> Generator:
     """Dagster sensor for 'do it' triggers."""
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
@@ -118,7 +146,18 @@ def jira_do_it_sensor() -> Generator:
     detector = TriggerDetector(jira, config=_build_trigger_config())
     triggered = detector.poll_do_it()
 
-    yield from _yield_run_requests(triggered, jira_base_url)
+    processed = _load_cursor(context.cursor)
+    now = datetime.now(timezone.utc).isoformat()
+    new_triggered = []
+    for t in triggered:
+        if t.key in processed:
+            logger.info("Skipping %s (already processed at %s)", t.key, processed[t.key])
+            continue
+        processed[t.key] = now
+        new_triggered.append(t)
+
+    context.update_cursor(_save_cursor(processed))
+    yield from _yield_run_requests(new_triggered, jira_base_url)
 
 
 @sensor(
@@ -130,7 +169,7 @@ def jira_do_it_sensor() -> Generator:
         "Yields a RunRequest for each triggered ticket (auto_merge=False)."
     ),
 )
-def jira_pr_only_sensor() -> Generator:
+def jira_pr_only_sensor(context: SensorEvaluationContext) -> Generator:
     """Dagster sensor for 'pull request' triggers."""
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
@@ -139,7 +178,18 @@ def jira_pr_only_sensor() -> Generator:
     detector = TriggerDetector(jira, config=_build_trigger_config())
     triggered = detector.poll_pr_only()
 
-    yield from _yield_run_requests(triggered, jira_base_url)
+    processed = _load_cursor(context.cursor)
+    now = datetime.now(timezone.utc).isoformat()
+    new_triggered = []
+    for t in triggered:
+        if t.key in processed:
+            logger.info("Skipping %s (already processed at %s)", t.key, processed[t.key])
+            continue
+        processed[t.key] = now
+        new_triggered.append(t)
+
+    context.update_cursor(_save_cursor(processed))
+    yield from _yield_run_requests(new_triggered, jira_base_url)
 
 
 @sensor(
@@ -151,7 +201,7 @@ def jira_pr_only_sensor() -> Generator:
         "Yields a RunRequest for each triggered ticket after validating retry count."
     ),
 )
-def jira_retry_sensor() -> Generator:
+def jira_retry_sensor(context: SensorEvaluationContext) -> Generator:
     """Dagster sensor for 'retry' triggers."""
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
     jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
@@ -160,11 +210,23 @@ def jira_retry_sensor() -> Generator:
     detector = TriggerDetector(jira, config=_build_trigger_config())
     triggered = detector.poll_retry()
 
-    yield from _yield_run_requests(triggered, jira_base_url)
+    processed = _load_cursor(context.cursor)
+    now = datetime.now(timezone.utc).isoformat()
+    new_triggered = []
+    for t in triggered:
+        cursor_key = f"{t.key}-{t.retry_count}"
+        if cursor_key in processed:
+            logger.info("Skipping %s retry %d (already processed at %s)", t.key, t.retry_count, processed[cursor_key])
+            continue
+        processed[cursor_key] = now
+        new_triggered.append(t)
+
+    context.update_cursor(_save_cursor(processed))
+    yield from _yield_run_requests(new_triggered, jira_base_url)
 
 
 # ---------------------------------------------------------------------------
-# Scheduled trigger (twice daily)
+# Scheduled trigger (runs every 6 hours, cursor-based dedup)
 # ---------------------------------------------------------------------------
 
 
@@ -174,23 +236,21 @@ def _parse_schedule_users() -> list[str]:
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 
-@schedule(
+@sensor(
     job=stary_pipeline_with_markers,
-    cron_schedule="0 1,13 * * *",
-    execution_timezone="Europe/Warsaw",
-    name="jira_scheduled_trigger",
+    name="jira_users_trigger",
+    minimum_interval_seconds=21600,
     description=(
-        "Runs twice daily (01:00 and 13:00 Europe/Warsaw). "
-        "Queries Jira for tickets assigned to or reported by users "
-        "listed in STARY_SCHEDULE_USERS and triggers the pipeline "
-        "for each (auto_merge=False)."
+        "Polls Jira every ~6 hours for tickets assigned to or reported "
+        "by users listed in STARY_SCHEDULE_USERS and triggers the "
+        "pipeline for each (auto_merge=False)."
     ),
 )
-def jira_scheduled_trigger(context: ScheduleEvaluationContext) -> Generator:
-    """Dagster schedule for user-based Jira ticket processing."""
+def jira_users_trigger(context: SensorEvaluationContext) -> Generator:
+    """Dagster sensor for user-based Jira ticket processing."""
     users = _parse_schedule_users()
     if not users:
-        context.log.info("STARY_SCHEDULE_USERS is empty — skipping")
+        logger.info("STARY_SCHEDULE_USERS is empty — skipping")
         return
 
     jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
@@ -200,7 +260,19 @@ def jira_scheduled_trigger(context: ScheduleEvaluationContext) -> Generator:
     detector = TriggerDetector(jira, config=_build_trigger_config())
     triggered = detector.poll_scheduled(users)
 
-    for ticket in triggered:
+    processed = _load_cursor(context.cursor)
+    now = datetime.now(timezone.utc).isoformat()
+    new_triggered = []
+    for t in triggered:
+        if t.key in processed:
+            logger.info("Skipping %s (already processed at %s)", t.key, processed[t.key])
+            continue
+        processed[t.key] = now
+        new_triggered.append(t)
+
+    context.update_cursor(_save_cursor(processed))
+
+    for ticket in new_triggered:
         run_key = f"stary-scheduled-{ticket.key}-0"
         run_config = {
             "ops": {
