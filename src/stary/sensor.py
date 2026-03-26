@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from stary.jira_adapter import JiraComment
+from stary.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 from stary.ticket_status import (
@@ -137,6 +138,7 @@ class TriggerDetector:
     # Public API
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("sensor.poll")
     def poll(self) -> list[TriggeredTicket]:
         """Query Jira and return triggered tickets (all trigger types).
 
@@ -155,6 +157,7 @@ class TriggerDetector:
         logger.info("%d ticket(s) confirmed", len(triggered))
         return triggered
 
+    @tracer.start_as_current_span("sensor.poll_do_it")
     def poll_do_it(
         self, seen_keys: set[str] | None = None,
     ) -> list[TriggeredTicket]:
@@ -180,6 +183,7 @@ class TriggerDetector:
 
         return triggered
 
+    @tracer.start_as_current_span("sensor.poll_pr_only")
     def poll_pr_only(
         self, seen_keys: set[str] | None = None,
     ) -> list[TriggeredTicket]:
@@ -205,6 +209,7 @@ class TriggerDetector:
 
         return triggered
 
+    @tracer.start_as_current_span("sensor.poll_retry")
     def poll_retry(
         self, seen_keys: set[str] | None = None,
     ) -> list[TriggeredTicket]:
@@ -289,6 +294,7 @@ class TriggerDetector:
             + f'AND (assignee in ({quoted}) OR reporter in ({quoted})) '
         )
 
+    @tracer.start_as_current_span("sensor.poll_scheduled")
     def poll_scheduled(
         self,
         users: list[str],

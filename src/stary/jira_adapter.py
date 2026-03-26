@@ -10,15 +10,16 @@ This module has NO business logic — it's a pure data-access layer.
 
 import logging
 import os
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from stary.telemetry import record_jira_request
+from stary.telemetry import _normalise_route, tracer
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ class JiraAdapter:
     # Core HTTP methods
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("jira.request")
     def _request(
         self,
         method: str,
@@ -130,17 +132,29 @@ class JiraAdapter:
             requests.HTTPError: On non-2xx responses
             RuntimeError: On JSON parse errors
         """
+        span = trace.get_current_span()
+        span.set_attribute("http.method", method)
+        span.set_attribute("http.route", _normalise_route(endpoint))
+        span.set_attribute("http.url", f"{self.base_url}{endpoint}")
+
         url = f"{self.base_url}{endpoint}"
-        t0 = time.monotonic()
-        resp = self._session.request(
-            method=method,
-            url=url,
-            headers=self._headers(),
-            params=params,
-            json=json_body,
-            timeout=self.timeout,
-        )
-        record_jira_request(method, endpoint, resp.status_code, time.monotonic() - t0)
+        try:
+            resp = self._session.request(
+                method=method,
+                url=url,
+                headers=self._headers(),
+                params=params,
+                json=json_body,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(StatusCode.ERROR, str(exc))
+            raise
+
+        span.set_attribute("http.status_code", resp.status_code)
+        if resp.status_code >= 500:
+            span.set_status(StatusCode.ERROR, f"HTTP {resp.status_code}")
         if not resp.ok:
             logger.warning(
                 "Request failed: %s %s — HTTP %d: %.500s",

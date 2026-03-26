@@ -15,6 +15,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
+from opentelemetry import trace
+
+from stary.telemetry import tracer
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -105,6 +109,7 @@ class TicketStatusMarker:
     # Public API
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("ticket_status.mark_wip")
     def mark_wip(
         self,
         ticket_key: str,
@@ -119,10 +124,12 @@ class TicketStatusMarker:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             dagster_run_url: Optional URL to the Dagster pipeline run
         """
+        trace.get_current_span().set_attribute("ticket.key", ticket_key)
         comment_body = self.format_wip_comment(dagster_run_url)
         self.jira.add_comment(ticket_key, comment_body)
         logger.info("Marked %s as WIP", ticket_key)
 
+    @tracer.start_as_current_span("ticket_status.mark_done")
     def mark_done(
         self,
         ticket_key: str,
@@ -140,10 +147,12 @@ class TicketStatusMarker:
             status: Pipeline status (e.g., "APPROVED", "CHANGES_REQUESTED")
             reviews: Optional list of review dicts (parallel to pr_urls)
         """
+        trace.get_current_span().set_attribute("ticket.key", ticket_key)
         comment_body = self.format_done_comment(pr_url, status, reviews)
         self.jira.add_comment(ticket_key, comment_body)
         logger.info("Marked %s as done (status=%s)", ticket_key, status)
 
+    @tracer.start_as_current_span("ticket_status.mark_failed")
     def mark_failed(
         self,
         ticket_key: str,
@@ -162,6 +171,7 @@ class TicketStatusMarker:
             error_message: Short error description (not full traceback)
             dagster_run_url: Optional URL to the Dagster pipeline run
         """
+        trace.get_current_span().set_attribute("ticket.key", ticket_key)
         comment_body = self.format_failed_comment(
             failed_step, error_message, dagster_run_url
         )

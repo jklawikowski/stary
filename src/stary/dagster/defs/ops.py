@@ -16,8 +16,10 @@ import os
 from typing import Any, Dict
 
 from dagster import Field, In, Nothing, OpExecutionContext, Out, op
+from opentelemetry import trace
 
 from stary.config import build_dagster_run_url, get_dagster_base_url
+from stary.telemetry import tracer
 
 
 # ---------------------------------------------------------------------------
@@ -41,32 +43,36 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
     jira_token = os.environ.get("JIRA_TOKEN", "")
     if not jira_token:
         raise RuntimeError("JIRA_TOKEN environment variable is not set")
-    agent = TaskReader(
-        jira_base_url=cfg["jira_base_url"],
-        jira_token=jira_token,
-    )
 
-    ticket_url = cfg["ticket_url"]
-    context.log.info("TaskReader: reading ticket %s", ticket_url)
-    task_input = agent.run(ticket_url)
+    with tracer.start_as_current_span("dagster.op.read_jira_ticket") as span:
+        span.set_attribute("ticket.url", cfg["ticket_url"])
+        agent = TaskReader(
+            jira_base_url=cfg["jira_base_url"],
+            jira_token=jira_token,
+        )
 
-    ticket_id = task_input.get("ticket_id", "UNKNOWN")
-    tasks = task_input.get("tasks", [])
-    repo_urls = sorted({t["repo_url"] for t in tasks if t.get("repo_url")})
+        ticket_url = cfg["ticket_url"]
+        context.log.info("TaskReader: reading ticket %s", ticket_url)
+        task_input = agent.run(ticket_url)
 
-    context.log.info(
-        "TaskReader: %s — %d task(s) across %d repo(s)",
-        ticket_id, len(tasks), len(repo_urls),
-    )
-    for repo_url in repo_urls:
-        repo_tasks = [t for t in tasks if t.get("repo_url") == repo_url]
-        context.log.info("  repo: %s — %d task(s)", repo_url, len(repo_tasks))
-        for t in repo_tasks:
-            context.log.info(
-                "    - %s (detail: %d chars)",
-                t.get("title", "<no title>"),
-                len(t.get("detail", "")),
-            )
+        ticket_id = task_input.get("ticket_id", "UNKNOWN")
+        span.set_attribute("ticket.key", ticket_id)
+        tasks = task_input.get("tasks", [])
+        repo_urls = sorted({t["repo_url"] for t in tasks if t.get("repo_url")})
+
+        context.log.info(
+            "TaskReader: %s — %d task(s) across %d repo(s)",
+            ticket_id, len(tasks), len(repo_urls),
+        )
+        for repo_url in repo_urls:
+            repo_tasks = [t for t in tasks if t.get("repo_url") == repo_url]
+            context.log.info("  repo: %s — %d task(s)", repo_url, len(repo_tasks))
+            for t in repo_tasks:
+                context.log.info(
+                    "    - %s (detail: %d chars)",
+                    t.get("title", "<no title>"),
+                    len(t.get("detail", "")),
+                )
     return task_input
 
 
@@ -248,20 +254,23 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
     jira_token = os.environ.get("JIRA_TOKEN", "")
     if not jira_token:
         raise RuntimeError("JIRA_TOKEN environment variable is not set")
-    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
-    status_marker = TicketStatusMarker(jira)
 
-    # Build Dagster run URL when possible
-    dagster_base_url = get_dagster_base_url()
-    run_id = context.run_id
-    dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
+    with tracer.start_as_current_span("dagster.op.mark_ticket_wip") as span:
+        span.set_attribute("ticket.key", cfg["ticket_key"])
+        jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
+        status_marker = TicketStatusMarker(jira)
 
-    status_marker.mark_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
-    context.log.info(
-        "Marked %s as WIP (dagster_run_url=%s)",
-        cfg["ticket_key"],
-        dagster_run_url or "N/A",
-    )
+        # Build Dagster run URL when possible
+        dagster_base_url = get_dagster_base_url()
+        run_id = context.run_id
+        dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
+
+        status_marker.mark_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
+        context.log.info(
+            "Marked %s as WIP (dagster_run_url=%s)",
+            cfg["ticket_key"],
+            dagster_run_url or "N/A",
+        )
 
 
 @op(
@@ -283,21 +292,24 @@ def mark_ticket_done(context: OpExecutionContext, review_result: Dict) -> None:
     jira_token = os.environ.get("JIRA_TOKEN", "")
     if not jira_token:
         raise RuntimeError("JIRA_TOKEN environment variable is not set")
-    jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
-    status_marker = TicketStatusMarker(jira)
 
-    pr_urls = review_result.get("pr_urls", [])
-    reviews = review_result.get("reviews", [])
-    pr_summary = ", ".join(pr_urls) if pr_urls else "N/A"
-    status_marker.mark_done(
-        cfg["ticket_key"],
-        pr_url=pr_summary,
-        status=cfg["status"],
-        reviews=reviews or None,
-    )
-    context.log.info(
-        "Marked %s as done (status=%s, prs=%s)",
-        cfg["ticket_key"],
-        cfg["status"],
-        pr_summary,
-    )
+    with tracer.start_as_current_span("dagster.op.mark_ticket_done") as span:
+        span.set_attribute("ticket.key", cfg["ticket_key"])
+        jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
+        status_marker = TicketStatusMarker(jira)
+
+        pr_urls = review_result.get("pr_urls", [])
+        reviews = review_result.get("reviews", [])
+        pr_summary = ", ".join(pr_urls) if pr_urls else "N/A"
+        status_marker.mark_done(
+            cfg["ticket_key"],
+            pr_url=pr_summary,
+            status=cfg["status"],
+            reviews=reviews or None,
+        )
+        context.log.info(
+            "Marked %s as done (status=%s, prs=%s)",
+            cfg["ticket_key"],
+            cfg["status"],
+            pr_summary,
+        )

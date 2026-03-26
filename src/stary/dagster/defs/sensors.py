@@ -24,6 +24,7 @@ from stary.config import build_dagster_run_url, get_dagster_base_url
 from stary.dagster.defs.jobs import stary_pipeline, stary_pipeline_with_markers
 from stary.jira_adapter import JiraAdapter
 from stary.sensor import TriggerConfig, TriggerDetector, TicketStateValidator, TriggeredTicket
+from stary.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -139,69 +140,68 @@ def _yield_run_requests(
 )
 def stary_comment_sensor(context: SensorEvaluationContext) -> Generator:
     """Unified Dagster sensor for comment-based triggers."""
-    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
-    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+    span = tracer.start_span("dagster.sensor.comment_sensor")
+    try:
+        jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
+        jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
 
-    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    config = _build_trigger_config()
-    detector = TriggerDetector(jira, config=config)
-    validator = TicketStateValidator(config=config)
+        jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+        config = _build_trigger_config()
+        detector = TriggerDetector(jira, config=config)
+        validator = TicketStateValidator(config=config)
 
-    # Run 3 JQL queries, deduplicated
-    candidates = detector.poll_comment_triggers()
+        # Run 3 JQL queries, deduplicated
+        candidates = detector.poll_comment_triggers()
 
-    # Load shared cursor
-    processed = _load_cursor(context.cursor)
-    now = datetime.now(timezone.utc).isoformat()
+        # Load shared cursor
+        processed = _load_cursor(context.cursor)
+        now = datetime.now(timezone.utc).isoformat()
 
-    new_triggered: list[TriggeredTicket] = []
+        new_triggered: list[TriggeredTicket] = []
 
-    for ticket_key, ticket_url, trigger_hint in candidates:
-        # Cursor optimization: skip recently processed (non-retry)
-        if trigger_hint != "retry_candidate" and ticket_key in processed:
-            logger.info("Skipping %s (cursor hit at %s)", ticket_key, processed[ticket_key])
-            continue
+        for ticket_key, ticket_url, trigger_hint in candidates:
+            # Cursor optimization: skip recently processed (non-retry)
+            if trigger_hint != "retry_candidate" and ticket_key in processed:
+                logger.info("Skipping %s (cursor hit at %s)", ticket_key, processed[ticket_key])
+                continue
 
-        # Fetch comments and validate state
-        comments = jira.get_comments(ticket_key)
-        trigger_type, retry_count, auto_merge = validator.resolve_trigger(
-            comments, trigger_hint,
-        )
+            # Fetch comments and validate state
+            comments = jira.get_comments(ticket_key)
+            trigger_type, retry_count, auto_merge = validator.resolve_trigger(
+                comments, trigger_hint,
+            )
 
-        if trigger_type is None:
+            if trigger_type is None:
+                logger.info(
+                    "%s: not eligible (hint=%s, state determined from comments)",
+                    ticket_key, trigger_hint,
+                )
+                continue
+
+            # For retry, check cursor with retry-count key
+            cursor_key = f"{ticket_key}-{retry_count}" if trigger_type == "retry" else ticket_key
+            if cursor_key in processed:
+                logger.info("Skipping %s (cursor key %s hit)", ticket_key, cursor_key)
+                continue
+
             logger.info(
-                "%s: not eligible (hint=%s, state determined from comments)",
-                ticket_key, trigger_hint,
+                "Triggered: %s (type=%s, retry=%d, auto_merge=%s)",
+                ticket_key, trigger_type, retry_count, auto_merge,
             )
-            continue
-
-        # For retry, check cursor with retry-count key
-        cursor_key = f"{ticket_key}-{retry_count}" if trigger_type == "retry" else ticket_key
-        if cursor_key in processed:
-            logger.info("Skipping %s (cursor key %s hit)", ticket_key, cursor_key)
-            continue
-
-        logger.info(
-            "Triggered: %s (type=%s, retry=%d, auto_merge=%s)",
-            ticket_key, trigger_type, retry_count, auto_merge,
-        )
-        processed[cursor_key] = now
-        new_triggered.append(
-            TriggeredTicket(
-                key=ticket_key,
-                url=ticket_url,
-                auto_merge=auto_merge,
-                retry_count=retry_count,
+            processed[cursor_key] = now
+            new_triggered.append(
+                TriggeredTicket(
+                    key=ticket_key,
+                    url=ticket_url,
+                    auto_merge=auto_merge,
+                    retry_count=retry_count,
+                )
             )
-        )
 
-    context.update_cursor(_save_cursor(processed))
-    yield from _yield_run_requests(new_triggered, jira_base_url)
-
-
-# ---------------------------------------------------------------------------
-# Scheduled trigger (for tickets by user, rejects any stary-touched tickets)
-# ---------------------------------------------------------------------------
+        context.update_cursor(_save_cursor(processed))
+        yield from _yield_run_requests(new_triggered, jira_base_url)
+    finally:
+        span.end()
 
 
 def _parse_schedule_users() -> list[str]:
@@ -227,46 +227,50 @@ def stary_users_sensor(context: SensorEvaluationContext) -> Generator:
         logger.info("STARY_SCHEDULE_USERS is empty — skipping")
         return
 
-    jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
-    jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
+    span = tracer.start_span("dagster.sensor.users_sensor")
+    try:
+        jira_base_url = os.environ.get("JIRA_BASE_URL", JIRA_BASE_URL)
+        jira_token = os.environ.get("JIRA_TOKEN", JIRA_TOKEN)
 
-    jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-    config = _build_trigger_config()
-    detector = TriggerDetector(jira, config=config)
-    validator = TicketStateValidator(config=config)
+        jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+        config = _build_trigger_config()
+        detector = TriggerDetector(jira, config=config)
+        validator = TicketStateValidator(config=config)
 
-    candidates = detector.poll_scheduled_candidates(users)
+        candidates = detector.poll_scheduled_candidates(users)
 
-    processed = _load_cursor(context.cursor)
-    now = datetime.now(timezone.utc).isoformat()
+        processed = _load_cursor(context.cursor)
+        now = datetime.now(timezone.utc).isoformat()
 
-    new_triggered: list[TriggeredTicket] = []
+        new_triggered: list[TriggeredTicket] = []
 
-    for ticket_key, ticket_url in candidates:
-        if ticket_key in processed:
-            logger.info("Skipping %s (cursor hit at %s)", ticket_key, processed[ticket_key])
-            continue
+        for ticket_key, ticket_url in candidates:
+            if ticket_key in processed:
+                logger.info("Skipping %s (cursor hit at %s)", ticket_key, processed[ticket_key])
+                continue
 
-        # Fetch comments and verify ticket was never touched by stary
-        comments = jira.get_comments(ticket_key)
-        if not validator.resolve_scheduled(comments):
-            logger.info("%s: already handled by stary, skipping", ticket_key)
-            # Still add to cursor so we don't re-fetch comments next time
+            # Fetch comments and verify ticket was never touched by stary
+            comments = jira.get_comments(ticket_key)
+            if not validator.resolve_scheduled(comments):
+                logger.info("%s: already handled by stary, skipping", ticket_key)
+                # Still add to cursor so we don't re-fetch comments next time
+                processed[ticket_key] = now
+                continue
+
+            logger.info("Triggered: %s (type=scheduled, auto_merge=False)", ticket_key)
             processed[ticket_key] = now
-            continue
-
-        logger.info("Triggered: %s (type=scheduled, auto_merge=False)", ticket_key)
-        processed[ticket_key] = now
-        new_triggered.append(
-            TriggeredTicket(
-                key=ticket_key,
-                url=ticket_url,
-                auto_merge=False,
+            new_triggered.append(
+                TriggeredTicket(
+                    key=ticket_key,
+                    url=ticket_url,
+                    auto_merge=False,
+                )
             )
-        )
 
-    context.update_cursor(_save_cursor(processed))
-    yield from _yield_run_requests(new_triggered, jira_base_url)
+        context.update_cursor(_save_cursor(processed))
+        yield from _yield_run_requests(new_triggered, jira_base_url)
+    finally:
+        span.end()
 
 
 # ---------------------------------------------------------------------------
@@ -424,14 +428,16 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
         from stary.jira_adapter import JiraAdapter
         from stary.ticket_status import TicketStatusMarker
 
-        jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
-        status_marker = TicketStatusMarker(jira)
-        status_marker.mark_failed(
-            ticket_key=ticket_key,
-            failed_step=failed_step,
-            error_message=error_message,
-            dagster_run_url=dagster_run_url,
-        )
+        with tracer.start_as_current_span("dagster.sensor.failure_marker") as span:
+            span.set_attribute("ticket.key", ticket_key)
+            jira = JiraAdapter(base_url=jira_base_url, token=jira_token)
+            status_marker = TicketStatusMarker(jira)
+            status_marker.mark_failed(
+                ticket_key=ticket_key,
+                failed_step=failed_step,
+                error_message=error_message,
+                dagster_run_url=dagster_run_url,
+            )
         logger.info(
             "Posted failure marker to Jira ticket %s (step: %s)",
             ticket_key,

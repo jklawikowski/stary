@@ -35,11 +35,12 @@ data:
     connectors:
       spanmetrics:
         histogram:
-          disable: true
+          disable: false
         dimensions:
           - name: http.method
-          - name: http.url
+          - name: http.route
           - name: http.status_code
+          - name: ticket.key
         dimensions_cache_size: 1000
         aggregation_temporality: "AGGREGATION_TEMPORALITY_CUMULATIVE"
         metrics_flush_interval: 15s

@@ -13,11 +13,14 @@ from __future__ import annotations
 import logging
 import os
 
+from opentelemetry import trace
+
 logger = logging.getLogger(__name__)
 
 from stary.agents.tools import make_jira_tools
 from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
+from stary.telemetry import tracer
 
 JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.devtools.intel.com")
 JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
@@ -101,6 +104,7 @@ class TaskReader:
             token=self.jira_token,
         )
 
+    @tracer.start_as_current_span("task_reader.run")
     def run(self, ticket_input: str) -> dict:
         """Interpret a ticket and return structured input for downstream agents.
 
@@ -114,6 +118,8 @@ class TaskReader:
                 interpretation, tasks (each task has repo_url, title, detail).
         """
         issue_key = JiraAdapter.extract_issue_key(ticket_input)
+        span = trace.get_current_span()
+        span.set_attribute("ticket.key", issue_key)
         logger.info("Processing ticket %s", issue_key)
 
         tools = make_jira_tools(self._jira)

@@ -13,6 +13,7 @@ import time
 from collections import defaultdict
 
 import requests
+from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
 from stary.sensor import TriggerConfig, TriggerDetector
+from stary.telemetry import tracer
 from stary.ticket_status import StatusMarkerConfig, TicketStatusMarker
 
 POLL_INTERVAL = int(os.environ.get("SENSOR_POLL_INTERVAL", "60"))
@@ -141,6 +143,7 @@ class Orchestrator:
     # Run a single ticket through the full pipeline
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("orchestrator.run")
     def run(self, ticket_input: str, auto_merge: bool = True) -> dict:
         """Run the full agent pipeline for one ticket.
 
@@ -152,6 +155,8 @@ class Orchestrator:
             ticket_input: A Jira ticket URL.
             auto_merge: If True, merge PR automatically when code review passes.
         """
+        span = trace.get_current_span()
+        span.set_attribute("ticket.url", ticket_input)
         # Step 1 – interpret Jira ticket
         logger.info("=" * 60)
         logger.info("STEP 1: Reading Jira ticket")
@@ -159,6 +164,7 @@ class Orchestrator:
         task_input = self.task_reader.run(ticket_input)
 
         ticket_id = task_input.get("ticket_id", "UNKNOWN")
+        span.set_attribute("ticket.key", ticket_id)
         tasks = task_input.get("tasks", [])
         repo_urls = sorted({t["repo_url"] for t in tasks if t.get("repo_url")})
         logger.info(
@@ -231,6 +237,7 @@ class Orchestrator:
     # Sensor-driven loop
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("orchestrator.poll_once")
     def poll_once(self) -> list[str]:
         """Run one sensor poll cycle.  Returns list of processed ticket keys."""
         triggered = self._trigger_detector.poll()
