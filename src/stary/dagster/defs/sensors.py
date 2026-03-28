@@ -130,7 +130,7 @@ def _yield_run_requests(
 @sensor(
     job=stary_pipeline_with_markers,
     name="stary_comment_sensor",
-    minimum_interval_seconds=60,
+    minimum_interval_seconds=3600,
     description=(
         "Unified sensor for do_it, pr_only, and retry triggers. "
         "Runs 3 separate JQL queries, deduplicates candidates, "
@@ -213,7 +213,7 @@ def _parse_schedule_users() -> list[str]:
 @sensor(
     job=stary_pipeline_with_markers,
     name="stary_users_sensor",
-    minimum_interval_seconds=60,
+    minimum_interval_seconds=21600,
     description=(
         "Polls Jira every ~6 hours for tickets assigned to or reported "
         "by users listed in STARY_SCHEDULE_USERS. Only processes tickets "

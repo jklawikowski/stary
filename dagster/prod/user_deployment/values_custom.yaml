@@ -8,14 +8,21 @@ deployments:
   - name: "stary"
     image:
       repository: ger-is-registry.caas.intel.com/qa-platform/tools/stary/stary
-      tag: 0.3.3
+      tag: 0.3.6
       pullPolicy: IfNotPresent
     dagsterApiGrpcArgs:
       - "-m"
       - "stary.dagster.definitions"
     port: 4000
+    env:
+      - name: NO_PROXY
+        value: "0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,otel-collector"
+      - name: no_proxy
+        value: "0.0.0.0,127.0.0.1,localhost,intel.com,habana-labs.com,otel-collector"
     envSecrets:
       - name: stary
+    includeConfigInLaunchedRuns:
+      enabled: true
     readinessProbe:
       periodSeconds: 20
       timeoutSeconds: 3

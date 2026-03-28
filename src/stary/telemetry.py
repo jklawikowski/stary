@@ -75,8 +75,11 @@ def init_telemetry() -> None:
             "service.instance.id": socket.gethostname(),
         })
 
+        insecure = not endpoint.startswith("https://")
+        exporter = OTLPSpanExporter(insecure=insecure)
+
         provider = TracerProvider(resource=resource)
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
         _tracer_provider = provider
 
