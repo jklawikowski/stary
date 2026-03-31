@@ -89,6 +89,7 @@ def _yield_run_requests(
                     "config": {
                         "ticket_key": ticket_key,
                         "jira_base_url": jira_base_url,
+                        "trigger_author": ticket.trigger_author,
                     }
                 },
                 "read_jira_ticket": {
@@ -102,11 +103,18 @@ def _yield_run_requests(
                         "auto_merge": auto_merge,
                     }
                 },
+                "manage_ticket_lifecycle": {
+                    "config": {
+                        "ticket_key": ticket_key,
+                        "jira_base_url": jira_base_url,
+                    }
+                },
                 "mark_ticket_done": {
                     "config": {
                         "ticket_key": ticket_key,
                         "status": "COMPLETED",
                         "jira_base_url": jira_base_url,
+                        "trigger_author": ticket.trigger_author,
                     }
                 },
             }
@@ -167,8 +175,10 @@ def stary_comment_sensor(context: SensorEvaluationContext) -> Generator:
 
             # Fetch comments and validate state
             comments = jira.get_comments(ticket_key)
-            trigger_type, retry_count, auto_merge = validator.resolve_trigger(
-                comments, trigger_hint,
+            trigger_type, retry_count, auto_merge, trigger_author = (
+                validator.resolve_trigger(
+                    comments, trigger_hint,
+                )
             )
 
             if trigger_type is None:
@@ -195,6 +205,7 @@ def stary_comment_sensor(context: SensorEvaluationContext) -> Generator:
                     url=ticket_url,
                     auto_merge=auto_merge,
                     retry_count=retry_count,
+                    trigger_author=trigger_author,
                 )
             )
 
@@ -411,6 +422,14 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
         )
         return
 
+    # Extract trigger_author from run config
+    trigger_author = ""
+    for op_name in ("mark_ticket_wip", "mark_ticket_done"):
+        op_config = ops_config.get(op_name, {}).get("config", {})
+        if "trigger_author" in op_config:
+            trigger_author = op_config["trigger_author"]
+            break
+
     # Extract failure details
     failed_step, error_message = _extract_failure_info(context)
 
@@ -437,6 +456,7 @@ def monitor_stary_failures(context: RunFailureSensorContext) -> None:
                 failed_step=failed_step,
                 error_message=error_message,
                 dagster_run_url=dagster_run_url,
+                mention_user=trigger_author,
             )
         logger.info(
             "Posted failure marker to Jira ticket %s (step: %s)",

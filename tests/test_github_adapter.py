@@ -13,6 +13,7 @@ from stary.github_adapter import (
     PRFile,
     PullRequest,
     RepoFile,
+    _normalise_github_route,
 )
 
 
@@ -761,3 +762,37 @@ class TestRunGit:
         exc = exc_info.value
         assert exc.cmd == cmd
         assert exc.stderr == "error: branch already exists"
+
+
+# ---------------------------------------------------------------------------
+# Route normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubRouteNormalisation:
+    def test_repos_pulls(self):
+        assert (
+            _normalise_github_route("/repos/owner/repo/pulls/42")
+            == "/repos/{owner}/{repo}/pulls/{number}"
+        )
+
+    def test_repos_contents(self):
+        assert (
+            _normalise_github_route("/repos/o/r/contents/src/main.py")
+            == "/repos/{owner}/{repo}/contents/{path}"
+        )
+
+    def test_repos_git_trees(self):
+        assert (
+            _normalise_github_route("/repos/o/r/git/trees/main")
+            == "/repos/{owner}/{repo}/git/trees/{ref}"
+        )
+
+    def test_user_endpoint(self):
+        assert _normalise_github_route("/user") == "/user"
+
+    def test_repos_forks(self):
+        assert (
+            _normalise_github_route("/repos/o/r/forks")
+            == "/repos/{owner}/{repo}/forks"
+        )

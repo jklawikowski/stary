@@ -1,8 +1,8 @@
 """Tests for TriggerDetector split-JQL sensor refactoring.
 
 Verifies that the 3-query approach minimises Jira API calls:
-- do_it / pr_only triggers need zero comment fetches
-- only retry candidates trigger a get_comments call
+- do_it / pr_only triggers fetch comments only for matched tickets
+- retry candidates trigger a get_comments call
 """
 
 from unittest.mock import MagicMock
@@ -31,6 +31,9 @@ class TestDoItTrigger:
             [],                          # pr_only
             [],                          # retry
         ]
+        jira.get_comments.return_value = [
+            JiraComment(id="1", body="[~sys_qaplatformbot] do it", author="alice"),
+        ]
 
         tickets = detector.poll()
 
@@ -38,17 +41,20 @@ class TestDoItTrigger:
         assert tickets[0].key == "PROJ-1"
         assert tickets[0].auto_merge is True
 
-    def test_no_comment_fetch(self):
+    def test_comment_fetch_for_author(self):
         detector, jira = _make_detector()
         jira.search_issues.side_effect = [
             [JiraIssue(key="PROJ-1")],
             [],
             [],
         ]
+        jira.get_comments.return_value = [
+            JiraComment(id="1", body="[~sys_qaplatformbot] do it", author="alice"),
+        ]
 
         detector.poll()
 
-        jira.get_comments.assert_not_called()
+        jira.get_comments.assert_called_once_with("PROJ-1")
 
     def test_has_priority_over_pr_only(self):
         detector, jira = _make_detector()
@@ -56,6 +62,9 @@ class TestDoItTrigger:
             [JiraIssue(key="PROJ-1")],   # do_it
             [JiraIssue(key="PROJ-1")],   # pr_only (same ticket)
             [],                           # retry
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(id="1", body="[~sys_qaplatformbot] do it", author="alice"),
         ]
 
         tickets = detector.poll()
@@ -77,6 +86,11 @@ class TestPrOnlyTrigger:
             [JiraIssue(key="PROJ-2")],   # pr_only
             [],                          # retry
         ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] pull request", author="bob",
+            ),
+        ]
 
         tickets = detector.poll()
 
@@ -84,17 +98,22 @@ class TestPrOnlyTrigger:
         assert tickets[0].key == "PROJ-2"
         assert tickets[0].auto_merge is False
 
-    def test_no_comment_fetch(self):
+    def test_comment_fetch_for_author(self):
         detector, jira = _make_detector()
         jira.search_issues.side_effect = [
             [],
             [JiraIssue(key="PROJ-2")],
             [],
         ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] pull request", author="bob",
+            ),
+        ]
 
         detector.poll()
 
-        jira.get_comments.assert_not_called()
+        jira.get_comments.assert_called_once_with("PROJ-2")
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +130,12 @@ class TestRetryTrigger:
             [JiraIssue(key="PROJ-3")],   # retry
         ]
         jira.get_comments.return_value = [
-            JiraComment(id="1", body="[~sys_qaplatformbot] stary:failed"),
-            JiraComment(id="2", body="[~sys_qaplatformbot] retry"),
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] stary:failed", author="bot",
+            ),
+            JiraComment(
+                id="2", body="[~sys_qaplatformbot] retry", author="carol",
+            ),
         ]
 
         tickets = detector.poll()
@@ -131,9 +154,15 @@ class TestRetryTrigger:
             [JiraIssue(key="PROJ-3")],   # retry
         ]
         jira.get_comments.return_value = [
-            JiraComment(id="1", body="[~sys_qaplatformbot] do it"),
-            JiraComment(id="2", body="[~sys_qaplatformbot] stary:done"),
-            JiraComment(id="3", body="[~sys_qaplatformbot] retry"),
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] do it", author="alice",
+            ),
+            JiraComment(
+                id="2", body="[~sys_qaplatformbot] stary:done", author="bot",
+            ),
+            JiraComment(
+                id="3", body="[~sys_qaplatformbot] retry", author="carol",
+            ),
         ]
 
         tickets = detector.poll()
@@ -152,8 +181,12 @@ class TestRetryTrigger:
         ]
         # retry older than done → invalid (pipeline already completed after retry)
         jira.get_comments.return_value = [
-            JiraComment(id="1", body="[~sys_qaplatformbot] retry"),
-            JiraComment(id="2", body="[~sys_qaplatformbot] stary:done"),
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] retry", author="carol",
+            ),
+            JiraComment(
+                id="2", body="[~sys_qaplatformbot] stary:done", author="bot",
+            ),
         ]
 
         tickets = detector.poll()
@@ -170,8 +203,12 @@ class TestRetryTrigger:
         ]
         # retry older than failed → invalid
         jira.get_comments.return_value = [
-            JiraComment(id="1", body="[~sys_qaplatformbot] retry"),
-            JiraComment(id="2", body="[~sys_qaplatformbot] stary:failed"),
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] retry", author="carol",
+            ),
+            JiraComment(
+                id="2", body="[~sys_qaplatformbot] stary:failed", author="bot",
+            ),
         ]
 
         tickets = detector.poll()
@@ -195,7 +232,7 @@ class TestApiCallCount:
         assert jira.search_issues.call_count == 3
         jira.get_comments.assert_not_called()
 
-    def test_mixed_triggers_minimal_comment_fetches(self):
+    def test_mixed_triggers_comment_fetches(self):
         detector, jira = _make_detector()
         jira.search_issues.side_effect = [
             [JiraIssue(key="A-1"), JiraIssue(key="A-2")],  # do_it
@@ -203,15 +240,20 @@ class TestApiCallCount:
             [JiraIssue(key="C-1")],                          # retry
         ]
         jira.get_comments.return_value = [
-            JiraComment(id="1", body="[~sys_qaplatformbot] stary:failed"),
-            JiraComment(id="2", body="[~sys_qaplatformbot] retry"),
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] stary:failed", author="bot",
+            ),
+            JiraComment(
+                id="2", body="[~sys_qaplatformbot] retry", author="carol",
+            ),
         ]
 
         tickets = detector.poll()
 
-        # 3 search calls, 1 comment fetch (only for retry candidate)
+        # 3 search calls, comment fetches for each matched ticket
         assert jira.search_issues.call_count == 3
-        assert jira.get_comments.call_count == 1
+        # do_it(2) + pr_only(1) + retry(1) = 4 comment fetches
+        assert jira.get_comments.call_count == 4
         assert len(tickets) == 4
 
 
@@ -379,3 +421,127 @@ class TestPollCommentTriggers:
         candidates = detector.poll_comment_triggers()
 
         assert candidates == []
+
+
+# ---------------------------------------------------------------------------
+# trigger_author extraction
+# ---------------------------------------------------------------------------
+
+
+class TestTriggerAuthorExtraction:
+    def test_do_it_extracts_trigger_author(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="PROJ-1")],
+            [],
+            [],
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] do it", author="alice",
+            ),
+        ]
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 1
+        assert tickets[0].trigger_author == "alice"
+
+    def test_pr_only_extracts_trigger_author(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [],
+            [JiraIssue(key="PROJ-2")],
+            [],
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1",
+                body="[~sys_qaplatformbot] pull request",
+                author="bob",
+            ),
+        ]
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 1
+        assert tickets[0].trigger_author == "bob"
+
+    def test_retry_extracts_trigger_author(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [],
+            [],
+            [JiraIssue(key="PROJ-3")],
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] stary:failed", author="bot",
+            ),
+            JiraComment(
+                id="2", body="[~sys_qaplatformbot] retry", author="carol",
+            ),
+        ]
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 1
+        assert tickets[0].trigger_author == "carol"
+
+    def test_trigger_author_is_last_matching_comment_author(self):
+        """When multiple trigger comments exist, the LAST one's author is used."""
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="PROJ-1")],
+            [],
+            [],
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] do it", author="alice",
+            ),
+            JiraComment(
+                id="2", body="some unrelated comment", author="dave",
+            ),
+            JiraComment(
+                id="3", body="[~sys_qaplatformbot] do it", author="eve",
+            ),
+        ]
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 1
+        assert tickets[0].trigger_author == "eve"
+
+    def test_trigger_author_empty_when_no_match(self):
+        """If no matching comment is found, trigger_author is empty string."""
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="PROJ-1")],
+            [],
+            [],
+        ]
+        jira.get_comments.return_value = []
+
+        tickets = detector.poll()
+
+        assert len(tickets) == 1
+        assert tickets[0].trigger_author == ""
+
+    def test_to_dict_includes_trigger_author(self):
+        detector, jira = _make_detector()
+        jira.search_issues.side_effect = [
+            [JiraIssue(key="PROJ-1")],
+            [],
+            [],
+        ]
+        jira.get_comments.return_value = [
+            JiraComment(
+                id="1", body="[~sys_qaplatformbot] do it", author="alice",
+            ),
+        ]
+
+        tickets = detector.poll()
+
+        d = tickets[0].to_dict()
+        assert d["trigger_author"] == "alice"

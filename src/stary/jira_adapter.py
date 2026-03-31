@@ -303,6 +303,75 @@ class JiraAdapter:
         )
 
     # ------------------------------------------------------------------
+    # Transition operations
+    # ------------------------------------------------------------------
+
+    def get_transitions(self, issue_key: str) -> list[dict]:
+        """Get available transitions for an issue.
+
+        Args:
+            issue_key: Issue key (e.g., "PROJ-123")
+
+        Returns:
+            List of transition dicts with 'id', 'name', and 'to' keys.
+        """
+        resp = self._get(f"/rest/api/2/issue/{issue_key}/transitions")
+        data = resp.json()
+        return [
+            {
+                "id": t.get("id", ""),
+                "name": t.get("name", ""),
+                "to": t.get("to", {}).get("name", ""),
+            }
+            for t in data.get("transitions", [])
+        ]
+
+    def transition_issue(
+        self,
+        issue_key: str,
+        target_status: str,
+    ) -> bool:
+        """Transition an issue to a target status.
+
+        Finds the appropriate transition by matching the target status
+        name (case-insensitive) against available transitions.
+
+        Args:
+            issue_key: Issue key (e.g., "PROJ-123")
+            target_status: Target status name (e.g., "Done", "Closed")
+
+        Returns:
+            True if transition succeeded, False if no matching transition found.
+
+        Raises:
+            requests.HTTPError: On API errors.
+        """
+        transitions = self.get_transitions(issue_key)
+        target_lower = target_status.lower()
+        transition_id = None
+        for t in transitions:
+            if (
+                t["to"].lower() == target_lower
+                or t["name"].lower() == target_lower
+            ):
+                transition_id = t["id"]
+                break
+        if not transition_id:
+            logger.warning(
+                "No transition to '%s' available for %s. Available: %s",
+                target_status,
+                issue_key,
+                [t["name"] for t in transitions],
+            )
+            return False
+        self._post(
+            f"/rest/api/2/issue/{issue_key}/transitions",
+            json_body={"transition": {"id": transition_id}},
+        )
+        logger.info("Transitioned %s to '%s'", issue_key, target_status)
+        return True
+
+    # ------------------------------------------------------------------
     # URL helpers
     # ------------------------------------------------------------------
 

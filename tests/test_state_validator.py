@@ -192,7 +192,7 @@ class TestResolveTriggerDoItPrOnly:
     def test_do_it_idle_ticket(self):
         v = TicketStateValidator()
         comments = [_make_comment("[~sys_qaplatformbot] do it")]
-        trigger, retry, auto = v.resolve_trigger(comments, "do_it")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "do_it")
         assert trigger == "do_it"
         assert retry == 0
         assert auto is True
@@ -200,7 +200,7 @@ class TestResolveTriggerDoItPrOnly:
     def test_pr_only_idle_ticket(self):
         v = TicketStateValidator()
         comments = [_make_comment("[~sys_qaplatformbot] pull request")]
-        trigger, retry, auto = v.resolve_trigger(comments, "pr_only")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "pr_only")
         assert trigger == "pr_only"
         assert retry == 0
         assert auto is False
@@ -211,7 +211,7 @@ class TestResolveTriggerDoItPrOnly:
             _make_comment("[~sys_qaplatformbot] do it"),
             _make_comment("[~sys_qaplatformbot] stary:wip", created=_now_iso()),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "do_it")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "do_it")
         assert trigger is None
 
     def test_do_it_rejected_when_done(self):
@@ -220,7 +220,7 @@ class TestResolveTriggerDoItPrOnly:
             _make_comment("[~sys_qaplatformbot] do it"),
             _make_comment("[~sys_qaplatformbot] stary:done"),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "do_it")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "do_it")
         assert trigger is None
 
     def test_do_it_allowed_when_wip_stale(self):
@@ -229,7 +229,7 @@ class TestResolveTriggerDoItPrOnly:
             _make_comment("[~sys_qaplatformbot] do it"),
             _make_comment("[~sys_qaplatformbot] stary:wip", created=_hours_ago(5)),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "do_it")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "do_it")
         assert trigger == "do_it"
         assert auto is True
 
@@ -248,7 +248,7 @@ class TestResolveTriggerRetry:
             _make_comment("[~sys_qaplatformbot] stary:failed"),
             _make_comment("[~sys_qaplatformbot] retry"),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger == "retry"
         assert retry == 1
         assert auto is True  # original was "do it"
@@ -262,7 +262,7 @@ class TestResolveTriggerRetry:
             _make_comment("[~sys_qaplatformbot] stary:failed"),
             _make_comment("[~sys_qaplatformbot] retry"),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger == "retry"
         assert retry == 1
         assert auto is False  # original was "pull request" → must stay False
@@ -274,7 +274,7 @@ class TestResolveTriggerRetry:
             _make_comment("[~sys_qaplatformbot] stary:done"),
             _make_comment("[~sys_qaplatformbot] retry"),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger == "retry"
         assert retry == 1
         assert auto is True
@@ -285,13 +285,13 @@ class TestResolveTriggerRetry:
             _make_comment("[~sys_qaplatformbot] retry"),
             _make_comment("[~sys_qaplatformbot] stary:done"),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger is None
 
     def test_retry_rejected_when_idle(self):
         v = TicketStateValidator()
         comments = [_make_comment("[~sys_qaplatformbot] retry")]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger is None
 
     def test_retry_rejected_when_max_exceeded(self):
@@ -307,7 +307,7 @@ class TestResolveTriggerRetry:
             _make_comment("[~sys_qaplatformbot] stary:failed"),
             _make_comment("[~sys_qaplatformbot] retry"),  # 4th retry > MAX_RETRY_COUNT=3
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger is None
 
     def test_retry_rejected_when_wip(self):
@@ -315,7 +315,7 @@ class TestResolveTriggerRetry:
         comments = [
             _make_comment("[~sys_qaplatformbot] stary:wip", created=_now_iso()),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger is None
 
     def test_retry_no_original_trigger_defaults_auto_merge_true(self):
@@ -325,7 +325,7 @@ class TestResolveTriggerRetry:
             _make_comment("[~sys_qaplatformbot] stary:failed"),
             _make_comment("[~sys_qaplatformbot] retry"),
         ]
-        trigger, retry, auto = v.resolve_trigger(comments, "retry_candidate")
+        trigger, retry, auto, _author = v.resolve_trigger(comments, "retry_candidate")
         assert trigger == "retry"
         assert auto is True
 

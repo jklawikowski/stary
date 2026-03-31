@@ -11,6 +11,7 @@ The marker comments use the faceless/service account
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -106,6 +107,21 @@ class TicketStatusMarker:
         self.config = config or StatusMarkerConfig()
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _build_marker(self, base_marker: str, mention_user: str = "") -> str:
+        """Replace the account mention in a marker string.
+
+        If *mention_user* is provided, replaces ``[~sys_qaplatformbot]``
+        (or any ``[~…]`` mention) with ``[~mention_user]`` in the
+        marker.  The ``stary:xxx`` suffix is preserved.
+        """
+        if not mention_user:
+            return base_marker
+        return re.sub(r"\[~[^\]]+\]", f"[~{mention_user}]", base_marker)
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -114,6 +130,7 @@ class TicketStatusMarker:
         self,
         ticket_key: str,
         dagster_run_url: str | None = None,
+        mention_user: str = "",
     ) -> None:
         """Add a WIP marker comment to the ticket.
 
@@ -123,9 +140,10 @@ class TicketStatusMarker:
         Args:
             ticket_key: Jira issue key (e.g., "PROJ-123")
             dagster_run_url: Optional URL to the Dagster pipeline run
+            mention_user: Optional Jira username to mention instead of bot
         """
         trace.get_current_span().set_attribute("ticket.key", ticket_key)
-        comment_body = self.format_wip_comment(dagster_run_url)
+        comment_body = self.format_wip_comment(dagster_run_url, mention_user)
         self.jira.add_comment(ticket_key, comment_body)
         logger.info("Marked %s as WIP", ticket_key)
 
@@ -136,6 +154,7 @@ class TicketStatusMarker:
         pr_url: str,
         status: str,
         reviews: list[dict] | None = None,
+        mention_user: str = "",
     ) -> None:
         """Add a done marker comment with pipeline results.
 
@@ -146,9 +165,12 @@ class TicketStatusMarker:
             pr_url: URL to the created pull request
             status: Pipeline status (e.g., "APPROVED", "CHANGES_REQUESTED")
             reviews: Optional list of review dicts (parallel to pr_urls)
+            mention_user: Optional Jira username to mention instead of bot
         """
         trace.get_current_span().set_attribute("ticket.key", ticket_key)
-        comment_body = self.format_done_comment(pr_url, status, reviews)
+        comment_body = self.format_done_comment(
+            pr_url, status, reviews, mention_user,
+        )
         self.jira.add_comment(ticket_key, comment_body)
         logger.info("Marked %s as done (status=%s)", ticket_key, status)
 
@@ -159,6 +181,7 @@ class TicketStatusMarker:
         failed_step: str,
         error_message: str,
         dagster_run_url: str | None = None,
+        mention_user: str = "",
     ) -> None:
         """Add a failure marker comment when the pipeline fails.
 
@@ -170,10 +193,11 @@ class TicketStatusMarker:
             failed_step: Name of the op/step that failed
             error_message: Short error description (not full traceback)
             dagster_run_url: Optional URL to the Dagster pipeline run
+            mention_user: Optional Jira username to mention instead of bot
         """
         trace.get_current_span().set_attribute("ticket.key", ticket_key)
         comment_body = self.format_failed_comment(
-            failed_step, error_message, dagster_run_url
+            failed_step, error_message, dagster_run_url, mention_user,
         )
         self.jira.add_comment(ticket_key, comment_body)
         logger.info(
@@ -187,6 +211,7 @@ class TicketStatusMarker:
     def format_wip_comment(
         self,
         dagster_run_url: str | None = None,
+        mention_user: str = "",
     ) -> str:
         """Build the WIP comment body.
 
@@ -200,7 +225,7 @@ class TicketStatusMarker:
             Formatted comment body
         """
         lines = [
-            self.config.wip_marker,
+            self._build_marker(self.config.wip_marker, mention_user),
             "Pipeline has been triggered and is currently in progress.",
         ]
         if dagster_run_url:
@@ -212,6 +237,7 @@ class TicketStatusMarker:
         pr_url: str,
         status: str,
         reviews: list[dict] | None = None,
+        mention_user: str = "",
     ) -> str:
         """Build the done comment body.
 
@@ -225,7 +251,7 @@ class TicketStatusMarker:
         """
         pr_urls = [u.strip() for u in pr_url.split(",") if u.strip()]
         lines = [
-            self.config.done_marker,
+            self._build_marker(self.config.done_marker, mention_user),
             f"Status: {status}",
         ]
         for idx, url in enumerate(pr_urls):
@@ -242,6 +268,7 @@ class TicketStatusMarker:
         failed_step: str,
         error_message: str,
         dagster_run_url: str | None = None,
+        mention_user: str = "",
     ) -> str:
         """Build the failure comment body.
 
@@ -254,7 +281,7 @@ class TicketStatusMarker:
             Formatted comment body
         """
         lines = [
-            self.config.failed_marker,
+            self._build_marker(self.config.failed_marker, mention_user),
             f"*Failed step:* {failed_step}",
             "*Error:*",
             "{noformat}",

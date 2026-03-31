@@ -69,6 +69,7 @@ class TriggeredTicket:
     url: str
     auto_merge: bool
     retry_count: int = 0
+    trigger_author: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dict for backward compatibility."""
@@ -77,6 +78,7 @@ class TriggeredTicket:
             "ticket_url": self.url,
             "auto_merge": self.auto_merge,
             "retry_count": self.retry_count,
+            "trigger_author": self.trigger_author,
         }
 
 
@@ -173,12 +175,19 @@ class TriggerDetector:
                 continue
             seen_keys.add(issue.key)
             url = self.jira.build_browse_url(issue.key)
+            comments = self.jira.get_comments(issue.key)
+            author = self._find_trigger_author(
+                comments, self.config.trigger_comment,
+            )
             logger.info(
                 "Triggered: %s → %s (type=do_it, auto_merge=True)",
                 issue.key, url,
             )
             triggered.append(
-                TriggeredTicket(key=issue.key, url=url, auto_merge=True)
+                TriggeredTicket(
+                    key=issue.key, url=url, auto_merge=True,
+                    trigger_author=author,
+                )
             )
 
         return triggered
@@ -199,12 +208,19 @@ class TriggerDetector:
                 continue
             seen_keys.add(issue.key)
             url = self.jira.build_browse_url(issue.key)
+            comments = self.jira.get_comments(issue.key)
+            author = self._find_trigger_author(
+                comments, self.config.trigger_pr_only,
+            )
             logger.info(
                 "Triggered: %s → %s (type=pr_only, auto_merge=False)",
                 issue.key, url,
             )
             triggered.append(
-                TriggeredTicket(key=issue.key, url=url, auto_merge=False)
+                TriggeredTicket(
+                    key=issue.key, url=url, auto_merge=False,
+                    trigger_author=author,
+                )
             )
 
         return triggered
@@ -224,7 +240,9 @@ class TriggerDetector:
             if issue.key in seen_keys:
                 continue
             comments = self.jira.get_comments(issue.key)
-            trigger_type, retry_count = self.parse_trigger_type(comments)
+            trigger_type, retry_count, trigger_author = (
+                self.parse_trigger_type(comments)
+            )
             if trigger_type is None:
                 logger.info("%s: retry not valid, skipping", issue.key)
                 continue
@@ -239,10 +257,20 @@ class TriggerDetector:
                 TriggeredTicket(
                     key=issue.key, url=url,
                     auto_merge=auto_merge, retry_count=retry_count,
+                    trigger_author=trigger_author,
                 )
             )
 
         return triggered
+
+    def _find_trigger_author(
+        self, comments: list[JiraComment], marker: str,
+    ) -> str:
+        """Return the author of the last comment containing *marker*."""
+        for c in reversed(comments):
+            if marker in c.body:
+                return c.author
+        return ""
 
     def _base_jql(self) -> str:
         """Common JQL predicates shared by all trigger queries.
@@ -328,16 +356,17 @@ class TriggerDetector:
     def parse_trigger_type(
         self,
         comments: list[JiraComment],
-    ) -> tuple[str | None, int]:
+    ) -> tuple[str | None, int, str]:
         """Determine which trigger comment is present in a list of comments.
 
         Args:
             comments: List of JiraComment objects
 
         Returns:
-            Tuple of (trigger_type, retry_count) where:
+            Tuple of (trigger_type, retry_count, trigger_author) where:
             - trigger_type is "do_it", "pr_only", "retry", or None
-            - retry_count is the number of retry comments (0 for non-retry triggers)
+            - retry_count is the number of retry comments (0 for non-retry)
+            - trigger_author is the author of the last matching trigger comment
 
         Priority: retry > do_it > pr_only (if retry is valid)
         For retry triggers, validates that retry count is within limits.
@@ -355,15 +384,18 @@ class TriggerDetector:
         if retry_count > 0 and has_terminal:
             if retry_count <= self.config.max_retry_count:
                 if self._is_retry_newer_than_terminal(comments):
-                    return "retry", retry_count
+                    author = self._find_trigger_author(
+                        comments, self.config.trigger_retry,
+                    )
+                    return "retry", retry_count, author
                 # Retry comment exists but is older than last terminal marker
-                return None, 0
+                return None, 0, ""
             # Max retries exceeded
-            return None, 0
+            return None, 0, ""
 
         # If ticket has a terminal marker but no valid retry, reject
         if has_terminal:
-            return None, 0
+            return None, 0, ""
 
         # Normal trigger detection
         has_do_it = any(
@@ -374,10 +406,16 @@ class TriggerDetector:
         )
 
         if has_do_it:
-            return "do_it", 0
+            author = self._find_trigger_author(
+                comments, self.config.trigger_comment,
+            )
+            return "do_it", 0, author
         if has_pr_only:
-            return "pr_only", 0
-        return None, 0
+            author = self._find_trigger_author(
+                comments, self.config.trigger_pr_only,
+            )
+            return "pr_only", 0, author
+        return None, 0, ""
 
     def _count_retry_comments(self, comments: list[JiraComment]) -> int:
         """Count the number of retry trigger comments.
@@ -581,15 +619,16 @@ class TicketStateValidator:
         self,
         comments: list[JiraComment],
         trigger_hint: str,
-    ) -> tuple[str | None, int, bool]:
-        """Resolve the actual trigger type, retry count, and auto_merge.
+    ) -> tuple[str | None, int, bool, str]:
+        """Resolve the actual trigger type, retry count, auto_merge, and author.
 
         Args:
             comments: Full comment list for the ticket
             trigger_hint: Which JQL matched ("do_it", "pr_only", "retry_candidate")
 
         Returns:
-            (trigger_type, retry_count, auto_merge) or (None, 0, False) if invalid.
+            (trigger_type, retry_count, auto_merge, trigger_author)
+            or (None, 0, False, "") if invalid.
         """
         state = self.determine_state(comments)
 
@@ -598,15 +637,21 @@ class TicketStateValidator:
 
         if trigger_hint == "do_it":
             if self.is_eligible(state, "do_it"):
-                return "do_it", 0, True
-            return None, 0, False
+                author = self._find_trigger_author(
+                    comments, self.config.trigger_comment,
+                )
+                return "do_it", 0, True, author
+            return None, 0, False, ""
 
         if trigger_hint == "pr_only":
             if self.is_eligible(state, "pr_only"):
-                return "pr_only", 0, False
-            return None, 0, False
+                author = self._find_trigger_author(
+                    comments, self.config.trigger_pr_only,
+                )
+                return "pr_only", 0, False, author
+            return None, 0, False, ""
 
-        return None, 0, False
+        return None, 0, False, ""
 
     def resolve_scheduled(
         self,
@@ -624,22 +669,34 @@ class TicketStateValidator:
         self,
         comments: list[JiraComment],
         state: TicketState,
-    ) -> tuple[str | None, int, bool]:
+    ) -> tuple[str | None, int, bool, str]:
         """Validate and resolve a retry trigger."""
         if not self.is_eligible(state, "retry"):
-            return None, 0, False
+            return None, 0, False, ""
 
         retry_count = sum(
             1 for c in comments if self.config.trigger_retry in c.body
         )
         if retry_count > self.config.max_retry_count:
-            return None, 0, False
+            return None, 0, False, ""
 
         if not self._is_retry_newer_than_terminal(comments):
-            return None, 0, False
+            return None, 0, False, ""
 
         auto_merge = self._resolve_retry_auto_merge(comments)
-        return "retry", retry_count, auto_merge
+        author = self._find_trigger_author(
+            comments, self.config.trigger_retry,
+        )
+        return "retry", retry_count, auto_merge, author
+
+    def _find_trigger_author(
+        self, comments: list[JiraComment], marker: str,
+    ) -> str:
+        """Return the author of the last comment containing *marker*."""
+        for c in reversed(comments):
+            if marker in c.body:
+                return c.author
+        return ""
 
     def _resolve_retry_auto_merge(
         self,
