@@ -21,8 +21,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from stary.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,35 @@ DEFAULT_BACKOFF_FACTOR = 0.5
 _PR_URL_RE = re.compile(
     r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
 )
+
+
+def _normalise_github_route(endpoint: str) -> str:
+    """Replace dynamic path segments with placeholders for GitHub API routes.
+
+    >>> _normalise_github_route("/repos/owner/repo/pulls/123")
+    '/repos/{owner}/{repo}/pulls/{number}'
+    >>> _normalise_github_route("/repos/owner/repo/contents/src/main.py")
+    '/repos/{owner}/{repo}/contents/{path}'
+    >>> _normalise_github_route("/user")
+    '/user'
+    """
+    import re as _re
+
+    # /repos/{owner}/{repo}/...
+    result = _re.sub(
+        r"^/repos/[^/]+/[^/]+",
+        "/repos/{owner}/{repo}",
+        endpoint,
+    )
+    # /pulls/{number}, /issues/{number}
+    result = _re.sub(r"/(pulls|issues)/(\d+)", r"/\1/{number}", result)
+    # /git/trees/{branch}
+    result = _re.sub(r"/git/trees/[^/]+", "/git/trees/{ref}", result)
+    # /contents/{path} (everything after /contents/)
+    result = _re.sub(r"/contents/.+", "/contents/{path}", result)
+    # /merge-upstream, /merge — leave as-is
+    # /forks — leave as-is
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +178,7 @@ class GitHubAdapter:
     # Core HTTP methods
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("github.request")
     def _request(
         self,
         method: str,
@@ -168,15 +202,29 @@ class GitHubAdapter:
         Raises:
             requests.HTTPError: On non-2xx responses
         """
+        span = trace.get_current_span()
+        span.set_attribute("http.method", method)
+        span.set_attribute("http.route", _normalise_github_route(endpoint))
+        span.set_attribute("http.url", f"{self.api_url}{endpoint}")
+
         url = f"{self.api_url}{endpoint}"
-        resp = self._session.request(
-            method=method,
-            url=url,
-            headers=self._headers(accept),
-            params=params,
-            json=json_body,
-            timeout=self.timeout,
-        )
+        try:
+            resp = self._session.request(
+                method=method,
+                url=url,
+                headers=self._headers(accept),
+                params=params,
+                json=json_body,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(StatusCode.ERROR, str(exc))
+            raise
+
+        span.set_attribute("http.status_code", resp.status_code)
+        if resp.status_code >= 500:
+            span.set_status(StatusCode.ERROR, f"HTTP {resp.status_code}")
         if not resp.ok:
             logger.warning(
                 "Request failed: %s %s — HTTP %d: %.500s",
@@ -630,6 +678,7 @@ class GitHubAdapter:
             return text.replace(self.token, "***")
         return text
 
+    @tracer.start_as_current_span("github.clone_repo")
     def clone_repo(self, repo_url: str, dest: Path) -> str:
         """Clone a repository to a local directory.
 
@@ -643,6 +692,9 @@ class GitHubAdapter:
         Returns:
             Absolute path to the cloned repository
         """
+        span = trace.get_current_span()
+        span.set_attribute("repo.url", repo_url)
+        span.set_attribute("repo.dest", str(dest))
         if dest.exists():
             logger.info("Removing existing clone at %s", dest)
             shutil.rmtree(dest)
@@ -653,6 +705,7 @@ class GitHubAdapter:
         self._run_git(["git", "clone", auth_url, str(dest)])
         return str(dest)
 
+    @tracer.start_as_current_span("github.create_branch")
     def create_branch(self, repo_path: str, branch_name: str) -> str:
         """Create and checkout a new branch in a local repository.
 
@@ -663,9 +716,12 @@ class GitHubAdapter:
         Returns:
             The branch name
         """
+        span = trace.get_current_span()
+        span.set_attribute("branch.name", branch_name)
         self._run_git(["git", "checkout", "-b", branch_name], cwd=repo_path)
         return branch_name
 
+    @tracer.start_as_current_span("github.commit_and_push")
     def commit_and_push(
         self,
         repo_path: str,
@@ -690,6 +746,9 @@ class GitHubAdapter:
         Raises:
             RuntimeError: If there are no staged changes
         """
+        span = trace.get_current_span()
+        span.set_attribute("repo.url", repo_url)
+        span.set_attribute("branch.name", branch_name)
         run = lambda cmd: self._run_git(cmd, cwd=repo_path)
 
         run(["git", "config", "user.name", self.git_user_name])

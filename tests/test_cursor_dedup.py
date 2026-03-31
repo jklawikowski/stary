@@ -198,7 +198,7 @@ class TestCommentSensorCursor:
             ("PROJ-3", "https://jira.example.com/browse/PROJ-3", "do_it"),
         ]
         MockJira.return_value.get_comments.return_value = []
-        MockValidator.return_value.resolve_trigger.return_value = ("do_it", 0, True)
+        MockValidator.return_value.resolve_trigger.return_value = ("do_it", 0, True, "")
 
         from stary.dagster.defs.sensors import stary_comment_sensor
         context = build_sensor_context(cursor=None)
@@ -227,7 +227,7 @@ class TestRetryCursorInCommentSensor:
             ("PROJ-1", "https://jira.example.com/browse/PROJ-1", "retry_candidate"),
         ]
         MockJira.return_value.get_comments.return_value = []
-        MockValidator.return_value.resolve_trigger.return_value = ("retry", 2, True)
+        MockValidator.return_value.resolve_trigger.return_value = ("retry", 2, True, "")
 
         now = datetime.now(timezone.utc).isoformat()
 
@@ -251,7 +251,7 @@ class TestRetryCursorInCommentSensor:
             ("PROJ-1", "https://jira.example.com/browse/PROJ-1", "retry_candidate"),
         ]
         MockJira.return_value.get_comments.return_value = []
-        MockValidator.return_value.resolve_trigger.return_value = ("retry", 1, True)
+        MockValidator.return_value.resolve_trigger.return_value = ("retry", 1, True, "")
 
         now = datetime.now(timezone.utc).isoformat()
 

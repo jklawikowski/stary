@@ -230,6 +230,54 @@ def review_code(context: OpExecutionContext, impl_result: Dict) -> Dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle: Transition Jira ticket status
+# ---------------------------------------------------------------------------
+
+@op(
+    description="Transition Jira ticket status after successful pipeline completion.",
+    config_schema={
+        "ticket_key": str,
+        "jira_base_url": str,
+    },
+    ins={"review_result": In(Dict)},
+    out=Out(Dict),
+)
+def manage_ticket_lifecycle(
+    context: OpExecutionContext, review_result: Dict,
+) -> Dict[str, Any]:
+    """Run Agent #4: transition ticket if all PRs approved and merged."""
+    from stary.agents.lifecycle import LifecycleAgent
+    from stary.jira_adapter import JiraAdapter
+
+    cfg = context.op_config
+    jira_token = os.environ.get("JIRA_TOKEN", "")
+    if not jira_token:
+        raise RuntimeError("JIRA_TOKEN environment variable is not set")
+
+    with tracer.start_as_current_span("dagster.op.lifecycle") as span:
+        span.set_attribute("ticket.key", cfg["ticket_key"])
+        jira = JiraAdapter(base_url=cfg["jira_base_url"], token=jira_token)
+        agent = LifecycleAgent(jira=jira)
+
+        pr_urls = review_result.get("pr_urls", [])
+        reviews = review_result.get("reviews", [])
+        all_approved = all(r.get("approved") for r in reviews) if reviews else False
+        any_merged = any(r.get("merged") for r in reviews) if reviews else False
+
+        result = agent.run(
+            ticket_key=cfg["ticket_key"],
+            pr_urls=pr_urls,
+            all_approved=all_approved,
+            merged=any_merged,
+        )
+        context.log.info(
+            "Lifecycle for %s: transitioned=%s",
+            cfg["ticket_key"], result.get("transitioned"),
+        )
+    return {**review_result, **result}
+
+
+# ---------------------------------------------------------------------------
 # Sensor helpers: Jira ticket status markers
 # ---------------------------------------------------------------------------
 
@@ -238,6 +286,7 @@ def review_code(context: OpExecutionContext, impl_result: Dict) -> Dict[str, Any
     config_schema={
         "ticket_key": str,
         "jira_base_url": str,
+        "trigger_author": Field(str, default_value="", is_required=False),
     },
     out=Out(Nothing),
 )
@@ -265,7 +314,11 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
         run_id = context.run_id
         dagster_run_url = build_dagster_run_url(dagster_base_url, run_id)
 
-        status_marker.mark_wip(cfg["ticket_key"], dagster_run_url=dagster_run_url)
+        status_marker.mark_wip(
+            cfg["ticket_key"],
+            dagster_run_url=dagster_run_url,
+            mention_user=cfg.get("trigger_author", ""),
+        )
         context.log.info(
             "Marked %s as WIP (dagster_run_url=%s)",
             cfg["ticket_key"],
@@ -279,6 +332,7 @@ def mark_ticket_wip(context: OpExecutionContext) -> None:
         "ticket_key": str,
         "status": str,
         "jira_base_url": str,
+        "trigger_author": Field(str, default_value="", is_required=False),
     },
     ins={"review_result": In(Dict)},
     out=Out(Nothing),
@@ -306,6 +360,7 @@ def mark_ticket_done(context: OpExecutionContext, review_result: Dict) -> None:
             pr_url=pr_summary,
             status=cfg["status"],
             reviews=reviews or None,
+            mention_user=cfg.get("trigger_author", ""),
         )
         context.log.info(
             "Marked %s as done (status=%s, prs=%s)",

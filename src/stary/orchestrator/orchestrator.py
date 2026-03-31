@@ -18,6 +18,7 @@ from opentelemetry import trace
 logger = logging.getLogger(__name__)
 
 from stary.agents import TaskReader, Planner, Implementer, Reviewer
+from stary.agents.lifecycle import LifecycleAgent
 from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
@@ -72,6 +73,7 @@ class Orchestrator:
             inference_client=self._inference,
             github=self._github,
         )
+        self.lifecycle = LifecycleAgent(jira=self._jira)
         self.poll_interval = poll_interval or POLL_INTERVAL
 
     # ------------------------------------------------------------------
@@ -226,11 +228,23 @@ class Orchestrator:
             sum(1 for r in reviews if r.get("approved")), pr_count,
         )
 
+        # Step 6 – lifecycle management (transition ticket if all approved)
+        all_approved = all(r.get("approved") for r in reviews) if reviews else False
+        any_merged = any(r.get("merged") for r in reviews) if reviews else False
+        lifecycle_result = self.lifecycle.run(
+            ticket_key=task_input.get("ticket_id", "UNKNOWN"),
+            pr_urls=pr_urls,
+            all_approved=all_approved,
+            merged=any_merged,
+        )
+        logger.info("Lifecycle: %s", lifecycle_result)
+
         return {
             "task_input": task_input,
             "planner_outputs": planner_outputs,
             "pr_urls": pr_urls,
             "reviews": reviews,
+            "lifecycle_result": lifecycle_result,
         }
 
     # ------------------------------------------------------------------
@@ -258,7 +272,7 @@ class Orchestrator:
                 key, url, auto_merge,
             )
             try:
-                self._status_marker.mark_wip(key)
+                self._status_marker.mark_wip(key, mention_user=ticket.trigger_author)
                 result = self.run(url, auto_merge=auto_merge)
                 pr_urls = result.get("pr_urls", [])
                 pr_summary = ", ".join(pr_urls) if pr_urls else "N/A"
@@ -266,11 +280,22 @@ class Orchestrator:
                 all_approved = all(r.get("approved") for r in reviews) if reviews else False
                 verdict = "APPROVED" if all_approved else "CHANGES_REQUESTED"
                 logger.info("<<< %s pipeline finished", key)
-                self._status_marker.mark_done(key, pr_url=pr_summary, status=verdict, reviews=reviews or None)
+                self._status_marker.mark_done(
+                    key,
+                    pr_url=pr_summary,
+                    status=verdict,
+                    reviews=reviews or None,
+                    mention_user=ticket.trigger_author,
+                )
                 processed.append(key)
             except Exception as exc:
                 logger.error("<<< %s pipeline FAILED: %s", key, exc)
-                self._status_marker.mark_done(key, pr_url="N/A", status=f"FAILED: {exc}")
+                self._status_marker.mark_done(
+                    key,
+                    pr_url="N/A",
+                    status=f"FAILED: {exc}",
+                    mention_user=ticket.trigger_author,
+                )
 
         return processed
 

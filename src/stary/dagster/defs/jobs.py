@@ -16,6 +16,7 @@ from dagster import MAX_RUNTIME_SECONDS_TAG, graph, job
 
 from stary.dagster.defs.ops import (
     implement_feature,
+    manage_ticket_lifecycle,
     mark_ticket_done,
     mark_ticket_wip,
     plan_tasks,
@@ -40,7 +41,8 @@ def stary_pipeline_graph() -> None:
     task_input = read_jira_ticket()
     plan_result = plan_tasks(task_input)
     impl_result = implement_feature(plan_result)
-    review_code(impl_result)
+    review_result = review_code(impl_result)
+    manage_ticket_lifecycle(review_result=review_result)
 
 
 stary_pipeline = stary_pipeline_graph.to_job(
@@ -69,7 +71,8 @@ def stary_pipeline_with_markers_graph() -> None:
     plan_result = plan_tasks(task_input)
     impl_result = implement_feature(plan_result)
     review_result = review_code(impl_result)
-    mark_ticket_done(review_result=review_result)
+    lifecycle_result = manage_ticket_lifecycle(review_result=review_result)
+    mark_ticket_done(review_result=lifecycle_result)
 
 
 stary_pipeline_with_markers = stary_pipeline_with_markers_graph.to_job(
