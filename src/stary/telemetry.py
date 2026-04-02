@@ -31,6 +31,12 @@ _tracer_provider = None
 _ISSUE_KEY_RE = re.compile(r"/rest/api/2/issue/[A-Z][A-Z0-9_]+-\d+")
 _COMMENT_SUFFIX_RE = re.compile(r"(/comment)/\d+")
 
+# Jenkins: /job/<name>/<number> → /job/{jobName}/{buildNumber}
+_JENKINS_BUILD_NUM_RE = re.compile(r"(/job/[^/]+)/(\d+)")
+_JENKINS_SUFFIX_RE = re.compile(
+    r"/(api/json|consoleText|testReport/api/json|testReport)$"
+)
+
 
 def _normalise_route(endpoint: str) -> str:
     """Replace dynamic path segments with placeholders.
@@ -45,6 +51,34 @@ def _normalise_route(endpoint: str) -> str:
     result = _ISSUE_KEY_RE.sub("/rest/api/2/issue/{issueKey}", endpoint)
     result = _COMMENT_SUFFIX_RE.sub(r"\1/{commentId}", result)
     return result
+
+
+def _normalise_jenkins_route(url: str) -> str:
+    """Normalise a Jenkins URL into a low-cardinality route for span metrics.
+
+    Strips the scheme + host, replaces build numbers with ``{buildNumber}``,
+    and strips API suffixes so all requests to the same job/build collapse.
+
+    >>> _normalise_jenkins_route(
+    ...     "https://ci.example.com/job/pipe/42/api/json"
+    ... )
+    '/job/pipe/{buildNumber}'
+    >>> _normalise_jenkins_route(
+    ...     "https://ci.example.com/job/folder/job/pipe/99/consoleText"
+    ... )
+    '/job/folder/job/pipe/{buildNumber}'
+    >>> _normalise_jenkins_route(
+    ...     "https://ci.example.com/job/pipe/42/testReport/api/json"
+    ... )
+    '/job/pipe/{buildNumber}'
+    """
+    from urllib.parse import urlparse
+    path = urlparse(url).path.rstrip("/")
+    # Strip API suffixes first
+    path = _JENKINS_SUFFIX_RE.sub("", path)
+    # Replace build numbers
+    path = _JENKINS_BUILD_NUM_RE.sub(r"\1/{buildNumber}", path)
+    return path
 
 
 def init_telemetry() -> None:

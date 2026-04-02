@@ -513,3 +513,127 @@ def make_github_review_tools(
             handler=read_repo_file,
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Jenkins tools (for TaskReader)
+# ---------------------------------------------------------------------------
+
+def make_jenkins_tools(jenkins_adapter) -> list[ToolDefinition]:
+    """Tools for fetching Jenkins build information.
+
+    Args:
+        jenkins_adapter: JenkinsAdapter instance.
+    """
+
+    def fetch_jenkins_build(url: str) -> str:
+        try:
+            build = jenkins_adapter.get_build_info(url)
+            duration_s = build.duration_ms / 1000 if build.duration_ms else 0
+            parts = [
+                f"Build: {build.full_display_name}",
+                f"Result: {build.result or 'IN PROGRESS'}",
+                f"Duration: {duration_s:.0f}s",
+                f"URL: {build.url}",
+            ]
+            if build.parameters:
+                params = "\n".join(f"  {k} = {v}" for k, v in build.parameters.items())
+                parts.append(f"Parameters:\n{params}")
+            return "\n".join(parts)
+        except Exception as exc:
+            logger.error("fetch_jenkins_build(%s) failed: %s", url, exc)
+            return f"Error fetching Jenkins build info for {url}: {exc}"
+
+    def fetch_jenkins_log(url: str, tail_lines: int = 500) -> str:
+        try:
+            return jenkins_adapter.get_console_log(url, tail_lines=tail_lines)
+        except Exception as exc:
+            logger.error("fetch_jenkins_log(%s) failed: %s", url, exc)
+            return f"Error fetching Jenkins log for {url}: {exc}"
+
+    def search_jenkins_log(url: str, pattern: str) -> str:
+        try:
+            return jenkins_adapter.search_console_log(url, pattern)
+        except Exception as exc:
+            logger.error("search_jenkins_log(%s, %s) failed: %s", url, pattern, exc)
+            return f"Error searching Jenkins log for {url}: {exc}"
+
+    def fetch_jenkins_test_report(url: str) -> str:
+        try:
+            report = jenkins_adapter.get_test_report(url)
+            if report is None:
+                return f"No test report available for {url}."
+            parts = [
+                f"Total: {report.total}  Passed: {report.passed}  "
+                f"Failed: {report.failed}  Skipped: {report.skipped}",
+            ]
+            if report.cases:
+                parts.append("\nFailed/errored tests:")
+                for case in report.cases[:30]:
+                    parts.append(f"  - {case.class_name}.{case.name} [{case.status}]")
+                    if case.error_message:
+                        # Truncate per-case error to keep output manageable
+                        msg = case.error_message[:500]
+                        parts.append(f"    {msg}")
+            return "\n".join(parts)
+        except Exception as exc:
+            logger.error("fetch_jenkins_test_report(%s) failed: %s", url, exc)
+            return f"Error fetching Jenkins test report for {url}: {exc}"
+
+    return [
+        ToolDefinition(
+            name="fetch_jenkins_build",
+            description=(
+                "Fetch metadata for a Jenkins build (status, duration, parameters). "
+                "Provide the full Jenkins build URL."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full Jenkins build URL"),
+            ],
+            handler=fetch_jenkins_build,
+        ),
+        ToolDefinition(
+            name="fetch_jenkins_log",
+            description=(
+                "Fetch console log output from a Jenkins build. Returns the "
+                "last tail_lines lines (default 500). Use search_jenkins_log "
+                "first for large logs to find relevant sections."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full Jenkins build URL"),
+                ToolParam(
+                    "tail_lines", "integer",
+                    "Number of lines from the end to return (default 500, use 0 for full log)",
+                    required=False,
+                ),
+            ],
+            handler=fetch_jenkins_log,
+        ),
+        ToolDefinition(
+            name="search_jenkins_log",
+            description=(
+                "Search a Jenkins build's console log for a pattern. "
+                "Returns matching lines with surrounding context. "
+                "Use this BEFORE fetch_jenkins_log to find relevant "
+                "sections in large logs (e.g. search for 'error', "
+                "'failed', 'exception', 'traceback')."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full Jenkins build URL"),
+                ToolParam("pattern", "string", "Text or regex pattern to search for"),
+            ],
+            handler=search_jenkins_log,
+        ),
+        ToolDefinition(
+            name="fetch_jenkins_test_report",
+            description=(
+                "Fetch JUnit test report from a Jenkins build. Returns "
+                "pass/fail/skip counts and details of failed tests. "
+                "Returns 'no test report' if the build has none."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full Jenkins build URL"),
+            ],
+            handler=fetch_jenkins_test_report,
+        ),
+    ]

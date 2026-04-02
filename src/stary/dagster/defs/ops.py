@@ -46,9 +46,18 @@ def read_jira_ticket(context: OpExecutionContext) -> Dict[str, Any]:
 
     with tracer.start_as_current_span("dagster.op.read_jira_ticket") as span:
         span.set_attribute("ticket.url", cfg["ticket_url"])
+
+        jenkins_hosts_raw = os.environ.get("JENKINS_ALLOWED_HOSTS", "")
+        jenkins_allowed_hosts = [
+            h.strip() for h in jenkins_hosts_raw.split(",") if h.strip()
+        ]
+
         agent = TaskReader(
             jira_base_url=cfg["jira_base_url"],
             jira_token=jira_token,
+            jenkins_allowed_hosts=jenkins_allowed_hosts or None,
+            jenkins_username=os.environ.get("JENKINS_USERNAME", ""),
+            jenkins_password=os.environ.get("JENKINS_PASSWORD", ""),
         )
 
         ticket_url = cfg["ticket_url"]

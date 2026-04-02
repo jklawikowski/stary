@@ -17,8 +17,14 @@ from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
-from stary.agents.tools import make_jira_tools
+from stary.agents.tools import make_jenkins_tools, make_jira_tools
 from stary.inference import InferenceClient, get_inference_client
+from stary.jenkins_adapter import (
+    JENKINS_ALLOWED_HOSTS,
+    JENKINS_PASSWORD,
+    JENKINS_USERNAME,
+    JenkinsAdapter,
+)
 from stary.jira_adapter import JiraAdapter
 from stary.telemetry import tracer
 
@@ -35,8 +41,17 @@ Your workflow:
 1. Use the fetch_ticket tool to get the ticket's summary and description.
 2. Optionally use get_comments to see any discussion or clarifications.
 3. Optionally use search_issues to find related tickets for context.
-4. Analyse the ticket and decompose it into concrete implementation tasks.
-5. Identify the TARGET REPOSITORY URL(s) from the ticket description.
+4. If the ticket description or comments contain Jenkins URLs, use the
+   Jenkins tools to gather build context:
+   a. Use fetch_jenkins_build to get build status and parameters.
+   b. Use search_jenkins_log with error-related patterns (e.g. "error",
+      "failed", "exception", "traceback") BEFORE fetching the full log.
+      This is critical — Jenkins logs can be very large.
+   c. Use fetch_jenkins_log (with tail_lines) only if you need more
+      context around the errors found by search_jenkins_log.
+   d. Use fetch_jenkins_test_report to get test pass/fail details.
+5. Analyse the ticket and decompose it into concrete implementation tasks.
+6. Identify the TARGET REPOSITORY URL(s) from the ticket description.
 
 CRITICAL RULES:
 - Do NOT produce your final JSON until you have fetched the ticket data.
@@ -95,6 +110,10 @@ class TaskReader:
         jira_base_url: str | None = None,
         jira_token: str | None = None,
         jira_adapter: JiraAdapter | None = None,
+        jenkins_allowed_hosts: list[str] | None = None,
+        jenkins_username: str | None = None,
+        jenkins_password: str | None = None,
+        jenkins_adapter: JenkinsAdapter | None = None,
     ):
         self._inference = inference_client or get_inference_client()
         self.jira_base_url = jira_base_url or JIRA_BASE_URL
@@ -103,6 +122,20 @@ class TaskReader:
             base_url=self.jira_base_url,
             token=self.jira_token,
         )
+        # Jenkins integration is optional — only active when hosts are configured.
+        self.jenkins_allowed_hosts = jenkins_allowed_hosts or JENKINS_ALLOWED_HOSTS
+        self.jenkins_username = jenkins_username or JENKINS_USERNAME
+        self.jenkins_password = jenkins_password or JENKINS_PASSWORD
+        if jenkins_adapter is not None:
+            self._jenkins: JenkinsAdapter | None = jenkins_adapter
+        elif self.jenkins_allowed_hosts:
+            self._jenkins = JenkinsAdapter(
+                allowed_hosts=self.jenkins_allowed_hosts,
+                username=self.jenkins_username,
+                password=self.jenkins_password,
+            )
+        else:
+            self._jenkins = None
 
     @tracer.start_as_current_span("task_reader.run")
     def run(self, ticket_input: str) -> dict:
@@ -123,6 +156,8 @@ class TaskReader:
         logger.info("Processing ticket %s", issue_key)
 
         tools = make_jira_tools(self._jira)
+        if self._jenkins is not None:
+            tools += make_jenkins_tools(self._jenkins)
 
         user_message = (
             f"Analyse Jira ticket **{issue_key}**.\n\n"
