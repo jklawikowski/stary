@@ -418,6 +418,201 @@ def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
 
 
 # ---------------------------------------------------------------------------
+# GitHub file URL parsing
+# ---------------------------------------------------------------------------
+
+_GITHUB_FILE_URL_RE = re.compile(
+    r"https?://github\.com/"
+    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)"
+    r"/(?P<kind>blob|tree)/(?P<rest>.+)",
+)
+
+_LINE_RANGE_RE = re.compile(r"#L(?P<start>\d+)(?:-L?(?P<end>\d+))?$")
+
+
+def _parse_github_file_url(url: str) -> dict:
+    """Parse a GitHub blob/tree URL into its components.
+
+    Returns a dict with keys: owner, repo, ref, path, start_line, end_line, kind.
+    Raises ``ValueError`` if the URL doesn't match the expected pattern.
+    """
+    url = url.strip()
+
+    # Extract line range before matching (fragment is part of URL text)
+    start_line: int | None = None
+    end_line: int | None = None
+    line_match = _LINE_RANGE_RE.search(url)
+    if line_match:
+        start_line = int(line_match.group("start"))
+        end_str = line_match.group("end")
+        end_line = int(end_str) if end_str else start_line
+        url = url[: line_match.start()]
+
+    m = _GITHUB_FILE_URL_RE.match(url)
+    if not m:
+        raise ValueError(f"Not a valid GitHub file URL: {url!r}")
+
+    owner = m.group("owner")
+    repo = m.group("repo")
+    kind = m.group("kind")
+    rest = m.group("rest").strip("/")
+
+    # rest = "<ref>/<path>".  The ref may contain slashes (e.g. feature/foo).
+    # We split on the first path component that looks like a real file/directory
+    # by trying progressively longer ref prefixes until the remainder is non-empty.
+    parts = rest.split("/")
+    if len(parts) == 1:
+        # Only a ref, no path — e.g. /tree/main
+        ref = parts[0]
+        path = ""
+    else:
+        # Default: first segment is ref, rest is path.  This is correct for
+        # simple branch names (main, master_next).  For branches with slashes
+        # we can't disambiguate perfectly without an API call, so we use the
+        # shortest ref (first segment) which covers the vast majority of cases.
+        ref = parts[0]
+        path = "/".join(parts[1:])
+
+    return {
+        "owner": owner,
+        "repo": repo,
+        "ref": ref,
+        "path": path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "kind": kind,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GitHub read tools (for TaskReader)
+# ---------------------------------------------------------------------------
+
+_MAX_FILE_CHARS = 50_000
+
+
+def make_github_read_tools(github_adapter) -> list[ToolDefinition]:
+    """Read-only GitHub tools for fetching file contents from URLs.
+
+    Designed for the TaskReader agent so it can read source files
+    referenced in Jira ticket descriptions and comments.
+
+    Args:
+        github_adapter: GitHubAdapter instance with a valid token.
+    """
+
+    def fetch_github_file(url: str) -> str:
+        try:
+            parsed = _parse_github_file_url(url)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        try:
+            content = github_adapter.get_file_contents(
+                parsed["owner"],
+                parsed["repo"],
+                parsed["path"],
+                ref=parsed["ref"],
+            )
+        except Exception as exc:
+            return (
+                f"Error fetching {parsed['owner']}/{parsed['repo']}/"
+                f"{parsed['path']} (ref={parsed['ref']}): {exc}"
+            )
+
+        # Apply line-range filter if URL had #L... fragment
+        if parsed["start_line"] is not None:
+            lines = content.splitlines()
+            start = max(0, parsed["start_line"] - 1)  # 1-based → 0-based
+            end = parsed["end_line"] or len(lines)
+            # Include some surrounding context (10 lines before, 5 after)
+            ctx_start = max(0, start - 10)
+            ctx_end = min(len(lines), end + 5)
+            selected = lines[ctx_start:ctx_end]
+            header = (
+                f"# {parsed['path']}  "
+                f"(lines {ctx_start + 1}-{ctx_end} of {len(lines)})\n"
+            )
+            content = header + "\n".join(
+                f"{ctx_start + i + 1:>5}: {line}"
+                for i, line in enumerate(selected)
+            )
+
+        if len(content) > _MAX_FILE_CHARS:
+            content = content[:_MAX_FILE_CHARS] + "\n... (truncated)"
+        return content
+
+    def list_github_directory(url: str) -> str:
+        try:
+            parsed = _parse_github_file_url(url)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        try:
+            all_paths = github_adapter.get_repo_tree(
+                parsed["owner"], parsed["repo"], parsed["ref"],
+            )
+        except Exception as exc:
+            return (
+                f"Error listing {parsed['owner']}/{parsed['repo']} "
+                f"(ref={parsed['ref']}): {exc}"
+            )
+
+        prefix = parsed["path"]
+        if prefix:
+            # Filter to entries under the requested directory
+            filtered = []
+            for p in all_paths:
+                if p.startswith(prefix + "/") or p == prefix:
+                    # Show path relative to the requested directory
+                    rel = p[len(prefix):].lstrip("/")
+                    if rel:
+                        filtered.append(rel)
+            if not filtered:
+                return f"No files found under '{prefix}' on ref '{parsed['ref']}'."
+            paths = filtered
+        else:
+            paths = all_paths
+
+        # Filter ignored directories
+        result: list[str] = []
+        for p in paths:
+            parts = p.split("/")
+            if any(part in _IGNORED_DIRS or part.endswith(".egg-info") for part in parts):
+                continue
+            result.append(p)
+        return "\n".join(result[:500]) if result else "(empty)"
+
+    return [
+        ToolDefinition(
+            name="fetch_github_file",
+            description=(
+                "Fetch the contents of a file from a GitHub URL. "
+                "Accepts full GitHub blob URLs like "
+                "'https://github.com/owner/repo/blob/branch/path/to/file.py' "
+                "or URLs with line anchors like '...file.py#L10-L25'. "
+                "Returns the file content (with line numbers if a range was specified)."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full GitHub file URL (blob URL)"),
+            ],
+            handler=fetch_github_file,
+        ),
+        ToolDefinition(
+            name="list_github_directory",
+            description=(
+                "List files in a GitHub repository directory from a URL. "
+                "Accepts full GitHub tree/blob URLs like "
+                "'https://github.com/owner/repo/tree/branch/path/to/dir'. "
+                "Returns file paths under that directory."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full GitHub URL (tree or blob URL)"),
+            ],
+            handler=list_github_directory,
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # GitHub API tools (for Reviewer)
 # ---------------------------------------------------------------------------
 

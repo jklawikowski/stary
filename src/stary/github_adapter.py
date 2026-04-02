@@ -21,8 +21,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from stary.telemetry import _normalise_github_route, tracer
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +149,7 @@ class GitHubAdapter:
     # Core HTTP methods
     # ------------------------------------------------------------------
 
+    @tracer.start_as_current_span("github.request")
     def _request(
         self,
         method: str,
@@ -168,15 +173,29 @@ class GitHubAdapter:
         Raises:
             requests.HTTPError: On non-2xx responses
         """
+        span = trace.get_current_span()
+        span.set_attribute("http.method", method)
+        span.set_attribute("http.route", _normalise_github_route(endpoint))
+        span.set_attribute("http.url", f"{self.api_url}{endpoint}")
+
         url = f"{self.api_url}{endpoint}"
-        resp = self._session.request(
-            method=method,
-            url=url,
-            headers=self._headers(accept),
-            params=params,
-            json=json_body,
-            timeout=self.timeout,
-        )
+        try:
+            resp = self._session.request(
+                method=method,
+                url=url,
+                headers=self._headers(accept),
+                params=params,
+                json=json_body,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(StatusCode.ERROR, str(exc))
+            raise
+
+        span.set_attribute("http.status_code", resp.status_code)
+        if resp.status_code >= 500:
+            span.set_status(StatusCode.ERROR, f"HTTP {resp.status_code}")
         if not resp.ok:
             logger.warning(
                 "Request failed: %s %s — HTTP %d: %.500s",
@@ -580,18 +599,23 @@ class GitHubAdapter:
             if item.get("type") == "blob"
         ]
 
-    def get_file_contents(self, owner: str, repo: str, path: str) -> str:
+    def get_file_contents(
+        self, owner: str, repo: str, path: str, ref: str | None = None,
+    ) -> str:
         """Read a file from the repository via the Contents API.
 
         Args:
             owner: Repository owner
             repo: Repository name
             path: File path within the repository
+            ref: Optional git ref (branch, tag, or SHA) to read from.
+                 Defaults to the repository's default branch.
 
         Returns:
             File contents as a string
         """
-        resp = self._get(f"/repos/{owner}/{repo}/contents/{path}")
+        params = {"ref": ref} if ref else {}
+        resp = self._get(f"/repos/{owner}/{repo}/contents/{path}", params=params)
         data = resp.json()
         if data.get("encoding") == "base64":
             return base64.b64decode(data["content"]).decode("utf-8", errors="replace")

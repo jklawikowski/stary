@@ -37,6 +37,13 @@ _JENKINS_SUFFIX_RE = re.compile(
     r"/(api/json|consoleText|testReport/api/json|testReport)$"
 )
 
+# GitHub: replace owner/repo names and PR/issue numbers with placeholders
+_GH_REPOS_RE = re.compile(r"/repos/[^/]+/[^/]+")
+_GH_PULLS_NUM_RE = re.compile(r"(/pulls?)/\d+")
+_GH_ISSUES_NUM_RE = re.compile(r"(/issues)/\d+")
+_GH_COMMENTS_NUM_RE = re.compile(r"(/comments)/\d+")
+_GH_TREES_SHA_RE = re.compile(r"(/git/trees)/[^/]+")
+
 
 def _normalise_route(endpoint: str) -> str:
     """Replace dynamic path segments with placeholders.
@@ -79,6 +86,26 @@ def _normalise_jenkins_route(url: str) -> str:
     # Replace build numbers
     path = _JENKINS_BUILD_NUM_RE.sub(r"\1/{buildNumber}", path)
     return path
+
+
+def _normalise_github_route(endpoint: str) -> str:
+    """Normalise a GitHub API endpoint into a low-cardinality route.
+
+    >>> _normalise_github_route("/repos/owner/repo/contents/src/main.py")
+    '/repos/{owner}/{repo}/contents/src/main.py'
+    >>> _normalise_github_route("/repos/org/project/pulls/42")
+    '/repos/{owner}/{repo}/pulls/{number}'
+    >>> _normalise_github_route("/repos/org/project/git/trees/abc123")
+    '/repos/{owner}/{repo}/git/trees/{ref}'
+    >>> _normalise_github_route("/user")
+    '/user'
+    """
+    result = _GH_REPOS_RE.sub("/repos/{owner}/{repo}", endpoint)
+    result = _GH_PULLS_NUM_RE.sub(r"\1/{number}", result)
+    result = _GH_ISSUES_NUM_RE.sub(r"\1/{number}", result)
+    result = _GH_COMMENTS_NUM_RE.sub(r"\1/{commentId}", result)
+    result = _GH_TREES_SHA_RE.sub(r"\1/{ref}", result)
+    return result
 
 
 def init_telemetry() -> None:

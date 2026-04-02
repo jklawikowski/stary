@@ -17,7 +17,8 @@ from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
-from stary.agents.tools import make_jenkins_tools, make_jira_tools
+from stary.agents.tools import make_github_read_tools, make_jenkins_tools, make_jira_tools
+from stary.github_adapter import GITHUB_TOKEN, GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
 from stary.jenkins_adapter import (
     JENKINS_ALLOWED_HOSTS,
@@ -41,7 +42,17 @@ Your workflow:
 1. Use the fetch_ticket tool to get the ticket's summary and description.
 2. Optionally use get_comments to see any discussion or clarifications.
 3. Optionally use search_issues to find related tickets for context.
-4. If the ticket description or comments contain Jenkins URLs, use the
+4. If the ticket description or comments contain GitHub file URLs
+   (github.com/.../blob/...), use the GitHub tools to read the
+   referenced source code — this gives you critical context about the
+   codebase being modified:
+   a. Use fetch_github_file to read files linked in the ticket.
+      Line-range anchors (e.g. #L460 or #L10-L25) are handled
+      automatically — only the relevant lines plus surrounding
+      context are returned.
+   b. Use list_github_directory to explore the directory structure
+      around the referenced files when you need more context.
+5. If the ticket description or comments contain Jenkins URLs, use the
    Jenkins tools to gather build context:
    a. Use fetch_jenkins_build to get build status and parameters.
    b. Use search_jenkins_log with error-related patterns (e.g. "error",
@@ -50,8 +61,8 @@ Your workflow:
    c. Use fetch_jenkins_log (with tail_lines) only if you need more
       context around the errors found by search_jenkins_log.
    d. Use fetch_jenkins_test_report to get test pass/fail details.
-5. Analyse the ticket and decompose it into concrete implementation tasks.
-6. Identify the TARGET REPOSITORY URL(s) from the ticket description.
+6. Analyse the ticket and decompose it into concrete implementation tasks.
+7. Identify the TARGET REPOSITORY URL(s) from the ticket description.
 
 CRITICAL RULES:
 - Do NOT produce your final JSON until you have fetched the ticket data.
@@ -114,6 +125,8 @@ class TaskReader:
         jenkins_username: str | None = None,
         jenkins_password: str | None = None,
         jenkins_adapter: JenkinsAdapter | None = None,
+        github_adapter: GitHubAdapter | None = None,
+        github_token: str | None = None,
     ):
         self._inference = inference_client or get_inference_client()
         self.jira_base_url = jira_base_url or JIRA_BASE_URL
@@ -137,6 +150,15 @@ class TaskReader:
         else:
             self._jenkins = None
 
+        # GitHub integration — active when a token is available.
+        _gh_token = github_token or GITHUB_TOKEN
+        if github_adapter is not None:
+            self._github: GitHubAdapter | None = github_adapter
+        elif _gh_token:
+            self._github = GitHubAdapter(token=_gh_token)
+        else:
+            self._github = None
+
     @tracer.start_as_current_span("task_reader.run")
     def run(self, ticket_input: str) -> dict:
         """Interpret a ticket and return structured input for downstream agents.
@@ -158,6 +180,8 @@ class TaskReader:
         tools = make_jira_tools(self._jira)
         if self._jenkins is not None:
             tools += make_jenkins_tools(self._jenkins)
+        if self._github is not None:
+            tools += make_github_read_tools(self._github)
 
         user_message = (
             f"Analyse Jira ticket **{issue_key}**.\n\n"
