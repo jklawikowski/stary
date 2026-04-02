@@ -103,7 +103,7 @@ class Reviewer:
                 ),
                 tools=tools,
                 temperature=0.2,
-                timeout=900.0,
+                timeout=1800.0,
                 max_iterations=20,
             )
         except Exception as exc:

@@ -161,7 +161,7 @@ class Implementer:
                 user=user,
                 tools=tools,
                 temperature=0.2,
-                timeout=900.0,
+                timeout=1800.0,
                 max_iterations=30,
             )
             logger.info("Step %d: done. Summary: %.200s", step_idx, response)

@@ -138,7 +138,7 @@ class TaskReader:
                 user=user_message,
                 tools=tools,
                 temperature=0.2,
-                timeout=900.0,
+                timeout=1800.0,
             )
         except Exception as exc:
             logger.error("LLM failed: %s", exc)

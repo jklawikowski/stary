@@ -212,7 +212,7 @@ class Planner:
                 user=user,
                 tools=tools,
                 temperature=0.2,
-                timeout=900.0,
+                timeout=1800.0,
                 max_iterations=30,
             )
         except Exception as exc:
