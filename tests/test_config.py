@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 
 from stary.config import build_dagster_run_url, get_dagster_base_url, validate_and_normalize_url
+from stary.config import RepoAllowlist, get_repo_allowlist
 
 
 # ---------------------------------------------------------------------------
@@ -91,3 +92,82 @@ class TestGetDagsterBaseUrl:
         with mock.patch.dict(os.environ, {"DAGSTER_BASE_URL": "not-a-url"}):
             with pytest.raises(ValueError):
                 get_dagster_base_url()
+
+
+# ---------------------------------------------------------------------------
+# RepoAllowlist
+# ---------------------------------------------------------------------------
+
+class TestRepoAllowlist:
+    def test_exact_match(self):
+        al = RepoAllowlist(["myorg/myrepo"])
+        assert al.is_allowed("myorg", "myrepo") is True
+
+    def test_exact_no_match(self):
+        al = RepoAllowlist(["myorg/myrepo"])
+        assert al.is_allowed("myorg", "other") is False
+
+    def test_org_wildcard(self):
+        al = RepoAllowlist(["myorg/*"])
+        assert al.is_allowed("myorg", "any-repo") is True
+        assert al.is_allowed("otherorg", "any-repo") is False
+
+    def test_case_insensitive(self):
+        al = RepoAllowlist(["MyOrg/MyRepo"])
+        assert al.is_allowed("myorg", "myrepo") is True
+        assert al.is_allowed("MYORG", "MYREPO") is True
+
+    def test_multiple_patterns(self):
+        al = RepoAllowlist(["orgA/*", "orgB/specific-repo"])
+        assert al.is_allowed("orgA", "anything") is True
+        assert al.is_allowed("orgB", "specific-repo") is True
+        assert al.is_allowed("orgB", "other") is False
+        assert al.is_allowed("orgC", "whatever") is False
+
+    def test_empty_denies_all(self):
+        al = RepoAllowlist([])
+        assert al.is_allowed("any", "repo") is False
+
+    def test_whitespace_stripped(self):
+        al = RepoAllowlist(["  myorg/myrepo  ", " orgB/* "])
+        assert al.is_allowed("myorg", "myrepo") is True
+        assert al.is_allowed("orgB", "x") is True
+
+    def test_assert_allowed_passes(self):
+        al = RepoAllowlist(["myorg/*"])
+        al.assert_allowed("myorg", "repo")  # should not raise
+
+    def test_assert_allowed_raises(self):
+        al = RepoAllowlist(["myorg/*"])
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            al.assert_allowed("evil", "repo")
+
+    def test_assert_allowed_empty_list(self):
+        al = RepoAllowlist([])
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            al.assert_allowed("any", "repo")
+
+
+class TestGetRepoAllowlist:
+    def test_unset_returns_empty(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            al = get_repo_allowlist()
+            assert al.patterns == []
+            assert al.is_allowed("any", "repo") is False
+
+    def test_single_pattern(self):
+        with mock.patch.dict(os.environ, {"ALLOWED_REPOS": "myorg/*"}):
+            al = get_repo_allowlist()
+            assert al.is_allowed("myorg", "x") is True
+
+    def test_comma_separated(self):
+        with mock.patch.dict(os.environ, {"ALLOWED_REPOS": "orgA/*, orgB/repo"}):
+            al = get_repo_allowlist()
+            assert al.is_allowed("orgA", "anything") is True
+            assert al.is_allowed("orgB", "repo") is True
+            assert al.is_allowed("orgB", "other") is False
+
+    def test_empty_string(self):
+        with mock.patch.dict(os.environ, {"ALLOWED_REPOS": ""}):
+            al = get_repo_allowlist()
+            assert al.patterns == []

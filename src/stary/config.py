@@ -1,8 +1,12 @@
 """Centralized configuration helpers for Stary."""
 
+import fnmatch
+import logging
 import os
 import re
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def get_dagster_base_url() -> Optional[str]:
@@ -69,3 +73,60 @@ def get_copilot_model() -> str:
     Defaults to 'gpt-4o' if COPILOT_MODEL is not set.
     """
     return os.environ.get("COPILOT_MODEL", "gpt-4o").strip()
+
+
+# ---------------------------------------------------------------------------
+# Repository allowlist
+# ---------------------------------------------------------------------------
+
+_ALLOWED_REPOS_ENV = "ALLOWED_REPOS"
+
+
+class RepoAllowlist:
+    """Gate write operations to an explicit set of GitHub repositories.
+
+    Patterns are ``owner/repo`` exact matches or ``owner/*`` org-wide
+    wildcards.  Matching is case-insensitive.
+
+    If the pattern list is empty the allowlist **denies everything**
+    (fail-closed).
+    """
+
+    def __init__(self, patterns: list[str]):
+        self._patterns = [p.strip().lower() for p in patterns if p.strip()]
+
+    def is_allowed(self, owner: str, repo: str) -> bool:
+        """Return *True* if ``owner/repo`` matches at least one pattern."""
+        if not self._patterns:
+            return False
+        candidate = f"{owner}/{repo}".lower()
+        return any(fnmatch.fnmatch(candidate, p) for p in self._patterns)
+
+    def assert_allowed(self, owner: str, repo: str) -> None:
+        """Raise ``ValueError`` when the repo is not on the allowlist."""
+        if not self.is_allowed(owner, repo):
+            raise ValueError(
+                f"Repository {owner}/{repo} is not in ALLOWED_REPOS. "
+                f"Allowed patterns: {self._patterns or '(none — all repos denied)'}"
+            )
+
+    @property
+    def patterns(self) -> list[str]:
+        return list(self._patterns)
+
+    def __repr__(self) -> str:
+        return f"RepoAllowlist({self._patterns!r})"
+
+
+def get_repo_allowlist() -> RepoAllowlist:
+    """Build a :class:`RepoAllowlist` from the ``ALLOWED_REPOS`` env var.
+
+    The variable is a comma-separated list of ``owner/repo`` or
+    ``owner/*`` patterns.  An empty / unset variable produces a
+    fail-closed allowlist that denies every repository.
+    """
+    raw = os.environ.get(_ALLOWED_REPOS_ENV, "")
+    patterns = [p.strip() for p in raw.split(",") if p.strip()]
+    allowlist = RepoAllowlist(patterns)
+    logger.info("Repo allowlist: %s", allowlist)
+    return allowlist

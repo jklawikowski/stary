@@ -39,6 +39,7 @@ x-stary-config-env: &stary-config-env
   JENKINS_ALLOWED_HOSTS: ${JENKINS_ALLOWED_HOSTS:-}
   JENKINS_USERNAME: ${JENKINS_USERNAME:-}
   JENKINS_PASSWORD: ${JENKINS_PASSWORD:-}
+  ALLOWED_REPOS: ${ALLOWED_REPOS:-}
 
 # ---------------------------------------------------------------------------
 # Services

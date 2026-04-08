@@ -14,6 +14,7 @@ from stary.github_adapter import (
     PullRequest,
     RepoFile,
 )
+from stary.config import RepoAllowlist
 
 
 # ---------------------------------------------------------------------------
@@ -761,3 +762,88 @@ class TestRunGit:
         exc = exc_info.value
         assert exc.cmd == cmd
         assert exc.stderr == "error: branch already exists"
+
+
+# ---------------------------------------------------------------------------
+# Repo-allowlist guard on write methods
+# ---------------------------------------------------------------------------
+
+class TestRepoAllowlistGuard:
+    """Verify that write operations raise when the repo is not allowed."""
+
+    def _blocked_adapter(self) -> GitHubAdapter:
+        return _make_adapter(repo_allowlist=RepoAllowlist(["allowed-org/*"]))
+
+    def _open_adapter(self) -> GitHubAdapter:
+        """Adapter with no allowlist — everything goes through."""
+        return _make_adapter()
+
+    # -- create_pull_request -------------------------------------------------
+
+    @patch("stary.github_adapter.requests.Session.post")
+    def test_create_pr_blocked(self, _mock_post):
+        adapter = self._blocked_adapter()
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            adapter.create_pull_request("evil-org", "repo", "t", "h", "b")
+
+    def test_create_pr_allowed(self):
+        adapter = self._blocked_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(
+            json_data={"number": 1, "html_url": "https://github.com/allowed-org/repo/pull/1", "node_id": "x"},
+        )
+        pr = adapter.create_pull_request("allowed-org", "repo", "title", "head", "base")
+        assert pr.number == 1
+
+    # -- fork_repo -----------------------------------------------------------
+
+    @patch("stary.github_adapter.requests.Session.post")
+    def test_fork_blocked(self, _mock_post):
+        adapter = self._blocked_adapter()
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            adapter.fork_repo("evil-org", "repo")
+
+    # -- merge_pull_request --------------------------------------------------
+
+    @patch("stary.github_adapter.requests.Session.put")
+    def test_merge_blocked(self, _mock_put):
+        adapter = self._blocked_adapter()
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            adapter.merge_pull_request("evil-org", "repo", 1)
+
+    # -- mark_pr_ready_for_review -------------------------------------------
+
+    @patch("stary.github_adapter.requests.Session.get")
+    def test_mark_ready_blocked(self, _mock_get):
+        adapter = self._blocked_adapter()
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            adapter.mark_pr_ready_for_review("evil-org", "repo", 1)
+
+    # -- clone_repo ----------------------------------------------------------
+
+    @patch("stary.github_adapter.subprocess.run")
+    @patch("stary.github_adapter.shutil.rmtree")
+    def test_clone_blocked(self, _mock_rm, _mock_run):
+        adapter = self._blocked_adapter()
+        from pathlib import Path
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            adapter.clone_repo("https://github.com/evil-org/repo", Path("/tmp/dest"))
+
+    # -- commit_and_push -----------------------------------------------------
+
+    @patch("stary.github_adapter.subprocess.run")
+    def test_push_blocked(self, _mock_run):
+        adapter = self._blocked_adapter()
+        with pytest.raises(ValueError, match="not in ALLOWED_REPOS"):
+            adapter.commit_and_push("/tmp/repo", "https://github.com/evil-org/repo", "branch", "msg")
+
+    # -- no allowlist (None) — everything allowed ----------------------------
+
+    def test_no_allowlist_allows_all(self):
+        adapter = self._open_adapter()
+        adapter._session = MagicMock()
+        adapter._session.request.return_value = _mock_response(
+            json_data={"number": 1, "html_url": "https://github.com/any/repo/pull/1", "node_id": "x"},
+        )
+        pr = adapter.create_pull_request("any", "repo", "title", "head", "base")
+        assert pr.number == 1

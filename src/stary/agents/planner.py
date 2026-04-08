@@ -168,6 +168,11 @@ class Planner:
 
         # 1. Check push permissions and fork if necessary
         owner, repo_name_parsed = GitHubAdapter.parse_repo_url(repo_url)
+
+        # Early allowlist check — fail fast before any network/disk I/O
+        if self._github._repo_allowlist is not None:
+            self._github._repo_allowlist.assert_allowed(owner, repo_name_parsed)
+
         if self._github.can_push(owner, repo_name_parsed):
             fork_owner = None
             clone_url = repo_url

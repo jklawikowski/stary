@@ -18,7 +18,7 @@ from typing import Any, Dict
 from dagster import Field, In, Nothing, OpExecutionContext, Out, op
 from opentelemetry import trace
 
-from stary.config import build_dagster_run_url, get_dagster_base_url
+from stary.config import RepoAllowlist, build_dagster_run_url, get_dagster_base_url, get_repo_allowlist
 from stary.telemetry import tracer
 
 
@@ -102,8 +102,11 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
     from collections import defaultdict
 
     from stary.agents import Planner
+    from stary.github_adapter import GitHubAdapter
 
     ticket_id = task_input.get("ticket_id", "UNKNOWN")
+
+    repo_allowlist = get_repo_allowlist()
 
     # Group tasks by repo_url
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -116,6 +119,11 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
 
     if not groups:
         raise RuntimeError("No tasks with a repo_url found in TaskReader output.")
+
+    # Validate all repos against allowlist before planning
+    for repo_url in groups:
+        owner, repo_name = GitHubAdapter.parse_repo_url(repo_url)
+        repo_allowlist.assert_allowed(owner, repo_name)
 
     repo_count = len(groups)
     context.log.info(
@@ -135,7 +143,7 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
             "summary": task_input.get("summary", ""),
             "tasks": tasks,
         }
-        agent = Planner()
+        agent = Planner(github=GitHubAdapter(repo_allowlist=repo_allowlist))
         planner_output = agent.run(group_input)
         repo_plans.append(planner_output)
 
@@ -165,10 +173,13 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
 def implement_feature(context: OpExecutionContext, plan_result: Dict) -> Dict[str, Any]:
     """Implement each repo plan and return all PR URLs."""
     from stary.agents import Implementer
+    from stary.github_adapter import GitHubAdapter
 
     repo_plans = plan_result.get("repo_plans", [])
     ticket_id = plan_result.get("ticket_id", "UNKNOWN")
     repo_count = len(repo_plans)
+
+    repo_allowlist = get_repo_allowlist()
 
     context.log.info(
         "Implementer: %s — %d repo(s) to implement", ticket_id, repo_count,
@@ -183,7 +194,7 @@ def implement_feature(context: OpExecutionContext, plan_result: Dict) -> Dict[st
         context.log.info("%s — %d step(s)", prefix, len(steps))
         context.log.info("%s", "=" * 60)
 
-        agent = Implementer()
+        agent = Implementer(github=GitHubAdapter(repo_allowlist=repo_allowlist))
         pr_url = agent.run(plan)
         pr_urls.append(pr_url)
         context.log.info("%s — PR created: %s", prefix, pr_url)
@@ -210,10 +221,13 @@ def implement_feature(context: OpExecutionContext, plan_result: Dict) -> Dict[st
 def review_code(context: OpExecutionContext, impl_result: Dict) -> Dict[str, Any]:
     """Perform automated code review on all PRs and optionally merge."""
     from stary.agents import Reviewer
+    from stary.github_adapter import GitHubAdapter
 
     cfg = context.op_config
     auto_merge = cfg.get("auto_merge", True)
     pr_urls = impl_result.get("pr_urls", [])
+
+    repo_allowlist = get_repo_allowlist()
 
     pr_count = len(pr_urls)
     context.log.info("Reviewer: %d PR(s) to review", pr_count)
@@ -224,7 +238,7 @@ def review_code(context: OpExecutionContext, impl_result: Dict) -> Dict[str, Any
         context.log.info("%s", "-" * 60)
         context.log.info("%s reviewing %s (auto_merge=%s)", prefix, pr_url, auto_merge)
 
-        agent = Reviewer()
+        agent = Reviewer(github=GitHubAdapter(repo_allowlist=repo_allowlist))
         review = agent.run(pr_url, auto_merge=auto_merge)
         reviews.append(review)
         verdict = "APPROVED" if review.get("approved") else "CHANGES REQUESTED"

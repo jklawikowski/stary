@@ -18,6 +18,7 @@ from opentelemetry import trace
 logger = logging.getLogger(__name__)
 
 from stary.agents import TaskReader, Planner, Implementer, Reviewer
+from stary.config import RepoAllowlist, get_repo_allowlist
 from stary.github_adapter import GitHubAdapter
 from stary.inference import InferenceClient, get_inference_client
 from stary.jira_adapter import JiraAdapter
@@ -39,6 +40,7 @@ class Orchestrator:
         git_user_name: str | None = None,
         git_user_email: str | None = None,
         poll_interval: int | None = None,
+        repo_allowlist: RepoAllowlist | None = None,
     ):
         self._inference = inference_client or get_inference_client()
 
@@ -47,10 +49,13 @@ class Orchestrator:
             token=jira_token,
         )
 
+        self._repo_allowlist = repo_allowlist if repo_allowlist is not None else get_repo_allowlist()
+
         self._github = GitHubAdapter(
             token=github_token,
             git_user_name=git_user_name,
             git_user_email=git_user_email,
+            repo_allowlist=self._repo_allowlist,
         )
 
         self._trigger_detector = TriggerDetector(self._jira)
@@ -178,6 +183,16 @@ class Orchestrator:
         # Step 2 – group tasks by repo
         repo_groups = self._group_tasks_by_repo(task_input)
         repo_count = len(repo_groups)
+
+        # Step 2b – validate all repos against allowlist (fail-fast)
+        for repo_url in repo_groups:
+            try:
+                owner, repo_name = GitHubAdapter.parse_repo_url(repo_url)
+                self._repo_allowlist.assert_allowed(owner, repo_name)
+            except ValueError as exc:
+                raise ValueError(
+                    f"[{ticket_id}] Repo blocked by allowlist: {exc}"
+                ) from exc
 
         # Step 3 – plan & implement per repo
         pr_urls: list[str] = []

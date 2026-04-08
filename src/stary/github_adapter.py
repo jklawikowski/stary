@@ -26,6 +26,7 @@ from opentelemetry.trace import StatusCode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from stary.config import RepoAllowlist
 from stary.telemetry import _normalise_github_route, tracer
 
 logger = logging.getLogger(__name__)
@@ -106,12 +107,14 @@ class GitHubAdapter:
         timeout: int = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
+        repo_allowlist: RepoAllowlist | None = None,
     ):
         self.token = token or GITHUB_TOKEN
         self.api_url = (api_url or GITHUB_API_URL).rstrip("/")
         self.git_user_name = git_user_name or GIT_USER_NAME
         self.git_user_email = git_user_email or GIT_USER_EMAIL
         self.timeout = timeout
+        self._repo_allowlist = repo_allowlist
         self._session = self._create_session(max_retries, backoff_factor)
 
     def _create_session(
@@ -308,6 +311,11 @@ class GitHubAdapter:
             for f in files
         ]
 
+    def _assert_repo_allowed(self, owner: str, repo: str) -> None:
+        """Raise if repo is blocked by the allowlist (when configured)."""
+        if self._repo_allowlist is not None:
+            self._repo_allowlist.assert_allowed(owner, repo)
+
     def create_pull_request(
         self,
         owner: str,
@@ -332,6 +340,7 @@ class GitHubAdapter:
         Returns:
             PullRequest object
         """
+        self._assert_repo_allowed(owner, repo)
         resp = self._post(
             f"/repos/{owner}/{repo}/pulls",
             json_body={
@@ -384,6 +393,7 @@ class GitHubAdapter:
         Returns:
             True if successfully marked as ready
         """
+        self._assert_repo_allowed(owner, repo)
         pr = self.get_pull_request(owner, repo, pr_number)
         if not pr.node_id:
             logger.error("Cannot mark ready: no node_id for PR #%d", pr_number)
@@ -435,6 +445,7 @@ class GitHubAdapter:
         Returns:
             True if merged successfully
         """
+        self._assert_repo_allowed(owner, repo)
         try:
             self._put(
                 f"/repos/{owner}/{repo}/pulls/{pr_number}/merge",
@@ -518,6 +529,7 @@ class GitHubAdapter:
         Returns:
             Clone URL of the fork (HTTPS)
         """
+        self._assert_repo_allowed(owner, repo)
         resp = self._post(f"/repos/{owner}/{repo}/forks")
         data = resp.json()
         fork_url = data.get("clone_url", "")
@@ -667,6 +679,12 @@ class GitHubAdapter:
         Returns:
             Absolute path to the cloned repository
         """
+        try:
+            owner, repo = self.parse_repo_url(repo_url)
+        except ValueError:
+            pass  # non-GitHub URLs skip allowlist check
+        else:
+            self._assert_repo_allowed(owner, repo)
         if dest.exists():
             logger.info("Removing existing clone at %s", dest)
             shutil.rmtree(dest)
@@ -714,6 +732,13 @@ class GitHubAdapter:
         Raises:
             RuntimeError: If there are no staged changes
         """
+        try:
+            owner, repo = self.parse_repo_url(repo_url)
+        except ValueError:
+            pass  # non-GitHub URLs skip allowlist check
+        else:
+            self._assert_repo_allowed(owner, repo)
+
         run = lambda cmd: self._run_git(cmd, cwd=repo_path)
 
         run(["git", "config", "user.name", self.git_user_name])
