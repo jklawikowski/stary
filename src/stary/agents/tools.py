@@ -710,6 +710,18 @@ def make_github_review_tools(
     ]
 
 
+# Common XPU failure signatures for automated log analysis
+XPU_ERROR_PATTERNS = [
+    "torch.OutOfMemoryError: XPU out of memory",
+    "UR_RESULT_ERROR_OUT_OF_RESOURCES",
+    "RuntimeError: PyTorch was compiled without CUDA support",
+    "AttributeError.*rope_parameters",
+    "selective_scan_fwd",
+    "CCL",
+    "level_zero backend failed",
+]
+
+
 # ---------------------------------------------------------------------------
 # Jenkins tools (for TaskReader)
 # ---------------------------------------------------------------------------
@@ -775,6 +787,27 @@ def make_jenkins_tools(jenkins_adapter) -> list[ToolDefinition]:
             logger.error("fetch_jenkins_test_report(%s) failed: %s", url, exc)
             return f"Error fetching Jenkins test report for {url}: {exc}"
 
+    def search_jenkins_log_xpu_errors(url: str) -> str:
+        """Search a Jenkins log for common XPU failure patterns."""
+        results = []
+        for pattern in XPU_ERROR_PATTERNS:
+            try:
+                matches = jenkins_adapter.search_console_log(url, pattern)
+                if matches and "0 match" not in matches:
+                    results.append(f"### Pattern: {pattern}\n{matches}")
+            except Exception as exc:
+                logger.error(
+                    "search_jenkins_log_xpu_errors(%s, %s) failed: %s",
+                    url, pattern, exc,
+                )
+                results.append(f"### Pattern: {pattern}\nError: {exc}")
+        if not results:
+            return "No common XPU error patterns found in the build log."
+        return (
+            f"Found XPU-related errors ({len(results)} pattern(s) matched):\n\n"
+            + "\n\n".join(results)
+        )
+
     return [
         ToolDefinition(
             name="fetch_jenkins_build",
@@ -830,5 +863,18 @@ def make_jenkins_tools(jenkins_adapter) -> list[ToolDefinition]:
                 ToolParam("url", "string", "Full Jenkins build URL"),
             ],
             handler=fetch_jenkins_test_report,
+        ),
+        ToolDefinition(
+            name="search_jenkins_log_xpu_errors",
+            description=(
+                "Search a Jenkins build log for common XPU/Intel GPU failure "
+                "patterns (OOM, missing kernels, CCL hangs, Level Zero errors). "
+                "Use this when analysing XPU-related test failures to quickly "
+                "identify known error signatures."
+            ),
+            parameters=[
+                ToolParam("url", "string", "Full Jenkins build URL"),
+            ],
+            handler=search_jenkins_log_xpu_errors,
         ),
     ]
