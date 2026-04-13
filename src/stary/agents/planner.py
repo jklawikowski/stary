@@ -109,6 +109,26 @@ Include in EVERY step's prompt:
 If no linter config exists, instruct steps to use: isort-compatible
 imports, 88-char line length, double quotes, trailing commas.
 
+## VerifAI / XPU domain guidance
+
+When tasks involve VerifAI or XPU work, pay special attention to:
+
+- **JSON workload configs**: Files with fields like `exec_bin`,
+  `workload_base_cmd`, `workload_params`, `pre_actions`, `output_dir`,
+  `extra_tests_path`. Steps that modify these should specify exact field
+  names and values.
+- **XPU adaptations**: When adapting configs from CPU/CUDA to XPU,
+  steps should include: changing device type, adjusting tensor parallel
+  (TP) size for memory constraints, adding env vars like
+  `PYTORCH_ENABLE_XPU_FALLBACK=1`, and setting up XPU-specific
+  `pre_actions` (conda env activation, environment variable exports).
+- **Test naming**: VerifAI tests follow the convention
+  `test__inference__<model>__<config>__<precision>__<mode>__<device>__<backend>`.
+  Steps should preserve this convention.
+- **Shell scripts**: `run.sh` scripts configure test execution. Steps
+  modifying these should be precise about which variables or commands
+  to change.
+
 When you have finished exploring and are ready, provide your FINAL
 answer as ONLY valid JSON (no markdown fences) with this schema:
 {

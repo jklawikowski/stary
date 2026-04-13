@@ -91,6 +91,43 @@ Rules for identifying repository URLs:
 - If a task has no identifiable repository, set its repo_url to an
   empty string.
 
+## VerifAI / XPU ticket recognition — DOMAIN KNOWLEDGE
+
+Many tickets target the VerifAI validation framework and XPU (Intel GPU)
+test infrastructure. Recognise these patterns:
+
+### VerifAI tickets
+- Summary often starts with `[VerifAI]`.
+- Structure: Motivation section, Definition of Done (DoD) section.
+- Work involves: JSON workload config changes, shell script modifications,
+  Python test fixture changes, test enablement.
+- Target repositories are typically:
+  - `frameworks.ai.verifai.validation` — the validation framework
+  - `frameworks.ai.validation.workloads` — workload config JSONs
+  - `frameworks.ai.pytorch.gpu-models` — GPU model implementations
+- Test naming convention:
+  `test__inference__<model>__<config>__<precision>__<mode>__<device>__<backend>`
+
+### XPU blocker tickets (BLK-series)
+- Ticket IDs follow pattern BLK-NNN (e.g. BLK-016).
+- Structured format: Summary, Affected Models table, Log Evidence, Resolution.
+- Common XPU failure signatures in logs:
+  - `torch.OutOfMemoryError: XPU out of memory`
+  - `UR_RESULT_ERROR_OUT_OF_RESOURCES`
+  - `RuntimeError: PyTorch was compiled without CUDA support`
+  - `AttributeError` related to `rope_parameters`
+  - `selective_scan_fwd` (missing XPU kernel)
+  - `CCL` timeout or hang (distributed communication)
+  - `level_zero backend failed`
+- Typical fixes: reduce input/output lengths in JSON config, increase
+  tensor parallelism (TP), add `PYTORCH_ENABLE_XPU_FALLBACK=1`, change
+  device type to `xpu`.
+
+When you detect a VerifAI or XPU ticket, decompose tasks into specific
+actionable steps: JSON config edits, environment variable additions,
+shell script modifications, or Python test fixture updates. Always
+identify the correct target repository for each task.
+
 Your final JSON must follow this schema:
 {
   "interpretation": "<one-paragraph summary of what the ticket asks for>",

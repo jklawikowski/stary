@@ -48,8 +48,27 @@ to `.env` and fill in values, or export them before running.
 | `JIRA_TOKEN` | Yes | Bearer token for Jira REST API |
 | `GITHUB_TOKEN` | Yes | GitHub PAT for cloning and PR creation |
 | `DAGSTER_BASE_URL` | No | Base URL of the Dagster webserver UI (see below) |
+| `ALLOWED_REPOS` | No | Comma-separated `owner/repo` or `owner/*` patterns for PR targets |
+| `JENKINS_ALLOWED_HOSTS` | No | Comma-separated Jenkins hostnames for log analysis |
+| `JENKINS_USERNAME` | No | Jenkins username for authenticated access |
+| `JENKINS_PASSWORD` | No | Jenkins password/API token |
 
 *Required when using the `copilot` backend.
+
+### `ALLOWED_REPOS`
+
+Controls which repositories STARY is permitted to create pull requests
+against. This is a security guardrail — if the variable is empty or
+unset, **all repositories are denied** (fail-closed).
+
+Patterns use `owner/repo` exact matches or `owner/*` org-wide wildcards.
+Matching is case-insensitive.
+
+**Example for VerifAI/XPU work:**
+
+```bash
+ALLOWED_REPOS=intel-innersource/frameworks.ai.verifai.validation,intel-innersource/frameworks.ai.validation.workloads,intel-innersource/frameworks.ai.pytorch.gpu-models
+```
 
 ### `DAGSTER_BASE_URL`
 

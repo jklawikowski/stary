@@ -28,9 +28,9 @@ def _tool_by_name(tools, name):
 # ---------------------------------------------------------------------------
 
 class TestMakeJenkinsTools:
-    def test_returns_four_tools(self):
+    def test_returns_five_tools(self):
         tools = make_jenkins_tools(_make_mock_adapter())
-        assert len(tools) == 4
+        assert len(tools) == 5
 
     def test_tool_names(self):
         tools = make_jenkins_tools(_make_mock_adapter())
@@ -39,6 +39,7 @@ class TestMakeJenkinsTools:
             "fetch_jenkins_build",
             "fetch_jenkins_log",
             "search_jenkins_log",
+            "search_jenkins_log_xpu_errors",
             "fetch_jenkins_test_report",
         }
 
@@ -143,6 +144,54 @@ class TestSearchJenkinsLog:
         result = tool.handler(url="url", pattern="x")
 
         assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# search_jenkins_log_xpu_errors
+# ---------------------------------------------------------------------------
+
+
+class TestSearchJenkinsLogXpuErrors:
+    def test_finds_matching_patterns(self):
+        adapter = _make_mock_adapter()
+
+        # Return matches for OOM, empty for others
+        def side_effect(url, pattern):
+            if "OutOfMemory" in pattern:
+                return (
+                    "Found 1 match(es)\n"
+                    "line 42: torch.OutOfMemoryError: XPU out of memory"
+                )
+            return "Found 0 match(es)"
+
+        adapter.search_console_log.side_effect = side_effect
+        tool = _tool_by_name(
+            make_jenkins_tools(adapter), "search_jenkins_log_xpu_errors",
+        )
+        result = tool.handler(url="https://ci.example.com/job/pipe/42")
+
+        assert "XPU-related errors" in result
+        assert "OutOfMemory" in result
+
+    def test_returns_no_patterns_message(self):
+        adapter = _make_mock_adapter()
+        adapter.search_console_log.return_value = "Found 0 match(es)"
+        tool = _tool_by_name(
+            make_jenkins_tools(adapter), "search_jenkins_log_xpu_errors",
+        )
+        result = tool.handler(url="https://ci.example.com/job/pipe/42")
+
+        assert "No common XPU error patterns found" in result
+
+    def test_handles_exceptions_gracefully(self):
+        adapter = _make_mock_adapter()
+        adapter.search_console_log.side_effect = ConnectionError("timeout")
+        tool = _tool_by_name(
+            make_jenkins_tools(adapter), "search_jenkins_log_xpu_errors",
+        )
+        result = tool.handler(url="https://ci.example.com/job/pipe/42")
+
+        assert "Error" in result or "XPU-related errors" in result
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,24 @@ CRITICAL RULES:
   automatically after all steps finish.
 - When done, respond with a brief summary of what you implemented.
 
+## VerifAI / XPU implementation notes
+
+When implementing VerifAI or XPU-related changes:
+
+- **JSON config files**: Preserve existing structure. Only modify the
+  specific fields mentioned in the step. Common fields: `exec_bin`,
+  `workload_base_cmd`, `workload_params`, `pre_actions`, `output_dir`.
+- **XPU environment variables**: When adding XPU env vars, put them in
+  the `pre_actions` array or the appropriate shell script section.
+  Common vars: `PYTORCH_ENABLE_XPU_FALLBACK=1`,
+  `ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE`.
+- **Device type changes**: Replace `cuda` or `cpu` device references
+  with `xpu` only where specified. Do not blindly replace all
+  occurrences.
+- **Memory adjustments**: When reducing memory usage, adjust
+  `input_len`, `output_len`, `max_batch_size`, or `tensor_parallel`
+  as specified in the step.
+
 ## Code style — IMPORTANT
 
 Before writing or modifying ANY file, check the repository for linter /
