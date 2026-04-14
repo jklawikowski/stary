@@ -73,6 +73,7 @@ class JiraAdapter:
         self.token = token or JIRA_TOKEN
         self.timeout = timeout
         self._session = self._create_session(max_retries, backoff_factor)
+        self._epic_link_field: str | None = None
 
     def _create_session(
         self,
@@ -252,6 +253,164 @@ class JiraAdapter:
             summary=fields_data.get("summary", "") or "",
             description=fields_data.get("description", "") or "",
             fields=fields_data if fields_data else None,
+        )
+
+    # ------------------------------------------------------------------
+    # Epic link field discovery
+    # ------------------------------------------------------------------
+
+    def get_epic_link_field(self) -> str:
+        """Return the custom-field ID used for "Epic Link" on this instance.
+
+        The field name varies across Jira installations (commonly
+        ``customfield_10008``, ``customfield_11900``, etc.). This method
+        queries the field metadata once and caches the result.
+
+        Returns the field ID string, or an empty string if not found.
+        """
+        if self._epic_link_field is not None:
+            return self._epic_link_field
+
+        try:
+            resp = self._get("/rest/api/2/field")
+            for f in resp.json():
+                schema = f.get("schema") or {}
+                # Greenhopper's epic-link custom field type
+                if schema.get("custom") == "com.pyxis.greenhopper.jira:gh-epic-link":
+                    self._epic_link_field = f["id"]
+                    logger.info("Discovered epic-link field: %s", self._epic_link_field)
+                    return self._epic_link_field
+            # Fallback: match by name
+            for f in resp.json():
+                if f.get("name", "").lower() == "epic link" and f.get("custom"):
+                    self._epic_link_field = f["id"]
+                    logger.info("Discovered epic-link field (by name): %s", self._epic_link_field)
+                    return self._epic_link_field
+        except Exception as exc:
+            logger.warning("Failed to discover epic-link field: %s", exc)
+
+        self._epic_link_field = ""
+        return self._epic_link_field
+
+    # ------------------------------------------------------------------
+    # Issue link / hierarchy operations
+    # ------------------------------------------------------------------
+
+    def get_linked_issues(self, issue_key: str) -> list[dict]:
+        """Return issue links with their type and target summary/status.
+
+        Each returned dict has keys:
+            link_type, direction ("inward"/"outward"),
+            key, summary, status.
+        """
+        issue = self.get_issue(
+            issue_key,
+            fields=["issuelinks"],
+        )
+        links_raw = (issue.fields or {}).get("issuelinks") or []
+        results: list[dict] = []
+        for link in links_raw:
+            link_type = (link.get("type") or {}).get("name", "")
+            for direction in ("inwardIssue", "outwardIssue"):
+                target = link.get(direction)
+                if target:
+                    target_fields = target.get("fields") or {}
+                    status_obj = target_fields.get("status") or {}
+                    results.append({
+                        "link_type": link_type,
+                        "direction": "inward" if direction == "inwardIssue" else "outward",
+                        "key": target.get("key", ""),
+                        "summary": target_fields.get("summary", ""),
+                        "status": status_obj.get("name", ""),
+                    })
+        return results
+
+    def get_subtasks(self, issue_key: str) -> list[dict]:
+        """Return subtasks of an issue.
+
+        Each returned dict has keys: key, summary, status.
+        """
+        issue = self.get_issue(issue_key, fields=["subtasks"])
+        subtasks_raw = (issue.fields or {}).get("subtasks") or []
+        results: list[dict] = []
+        for st in subtasks_raw:
+            st_fields = st.get("fields") or {}
+            status_obj = st_fields.get("status") or {}
+            results.append({
+                "key": st.get("key", ""),
+                "summary": st_fields.get("summary", ""),
+                "status": status_obj.get("name", ""),
+            })
+        return results
+
+    def get_epic_children(
+        self, epic_key: str, max_results: int = 20,
+    ) -> list[JiraIssue]:
+        """Return issues belonging to an epic (capped to *max_results*).
+
+        Tries the standard ``\"Epic Link\"`` custom-field JQL first,
+        then falls back to the ``parent`` field JQL used by
+        next-gen / team-managed projects.
+        """
+        results = self.search_issues(
+            jql=f"\"Epic Link\" = {epic_key} ORDER BY rank ASC",
+            fields=["summary", "status", "issuetype", "assignee"],
+            max_results=max_results,
+        )
+        if not results:
+            results = self.search_issues(
+                jql=f"parent = {epic_key} ORDER BY rank ASC",
+                fields=["summary", "status", "issuetype", "assignee"],
+                max_results=max_results,
+            )
+        return results
+
+    def find_similar_resolved(
+        self,
+        issue_key: str,
+        max_results: int = 10,
+    ) -> list[JiraIssue]:
+        """Find resolved tickets in the same project & components.
+
+        Uses the source ticket's project key, component(s), and labels
+        to build a targeted JQL query.
+        """
+        issue = self.get_issue(
+            issue_key,
+            fields=["project", "components", "labels"],
+        )
+        fields = issue.fields or {}
+
+        project_key = (fields.get("project") or {}).get("key", "")
+        if not project_key:
+            # Fallback: extract from issue key
+            project_key = issue_key.rsplit("-", 1)[0]
+
+        components = fields.get("components") or []
+        labels = fields.get("labels") or []
+
+        clauses = [
+            f"project = {project_key}",
+            "statusCategory = Done",
+            f"key != {issue_key}",
+        ]
+
+        if components:
+            comp_names = ", ".join(
+                f'"{c.get("name", "")}"' for c in components if c.get("name")
+            )
+            if comp_names:
+                clauses.append(f"component in ({comp_names})")
+
+        if labels:
+            label_list = ", ".join(f'"{lb}"' for lb in labels)
+            clauses.append(f"labels in ({label_list})")
+
+        jql = " AND ".join(clauses) + " ORDER BY resolved DESC"
+        return self.search_issues(
+            jql=jql,
+            fields=["summary", "status", "resolution", "issuetype"],
+            max_results=max_results,
         )
 
     # ------------------------------------------------------------------

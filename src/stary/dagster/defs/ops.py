@@ -141,6 +141,8 @@ def plan_tasks(context: OpExecutionContext, task_input: Dict) -> Dict[str, Any]:
             "repo_url": repo_url,
             "ticket_id": ticket_id,
             "summary": task_input.get("summary", ""),
+            "description": task_input.get("description", ""),
+            "interpretation": task_input.get("interpretation", ""),
             "tasks": tasks,
         }
         agent = Planner(github=GitHubAdapter(repo_allowlist=repo_allowlist))

@@ -35,14 +35,44 @@ JIRA_TOKEN = os.environ.get("JIRA_TOKEN", "")
 _SYSTEM_PROMPT = """\
 You are an expert software architect and Jira ticket analyst.
 
-You have tools available to fetch Jira ticket data. Use them to gather
-all information you need about the ticket before producing your analysis.
+You have tools available to fetch Jira ticket data and explore related
+context. You MUST follow the structured exploration workflow below
+before producing your analysis.
 
-Your workflow:
-1. Use the fetch_ticket tool to get the ticket's summary and description.
-2. Optionally use get_comments to see any discussion or clarifications.
-3. Optionally use search_issues to find related tickets for context.
-4. If the ticket description or comments contain GitHub file URLs
+## MANDATORY exploration workflow — follow this order
+
+### Phase 1: Fetch the target ticket
+1. Use fetch_ticket to get the ticket's full metadata: summary,
+   description, status, priority, labels, components, linked issues,
+   subtasks, and epic/parent information.
+
+### Phase 2: Explore the Jira graph (MANDATORY — do ALL of these)
+2. Use get_linked_issues to fetch ALL linked tickets (blockers,
+   related, duplicates). Read carefully — these are human-curated
+   relationships and the highest-signal context available.
+3. If the ticket has a parent epic (shown in the Epic/Parent field
+   from fetch_ticket), use get_epic_children to list stories in
+   that epic. Scan the LIST to understand scope, but do NOT fetch
+   full descriptions of every child — only the overview matters here.
+4. If the ticket has subtasks, use get_subtasks to fetch them.
+   Subtasks often represent a human-curated decomposition that
+   should inform your own task breakdown.
+5. Drill-down budget: pick at most 3 linked or sibling tickets that
+   are MOST relevant (same component, blocking, or clearly overlapping
+   scope) and use fetch_ticket to read their descriptions.
+   Do NOT fetch more than 3 — the overview list from steps 2-4 is
+   sufficient for the rest.
+
+### Phase 3: Comments and resolved precedent
+6. Use get_comments to see discussion, clarifications, and decisions.
+7. Use find_similar_resolved to find previously resolved tickets in
+   the same project and components. Study these to understand:
+   - What repos were touched for similar work.
+   - What implementation patterns were used.
+   - What level of effort was involved.
+
+### Phase 4: External context (GitHub, Jenkins)
+8. If the ticket description or comments contain GitHub file URLs
    (github.com/.../blob/...), use the GitHub tools to read the
    referenced source code — this gives you critical context about the
    codebase being modified:
@@ -52,7 +82,7 @@ Your workflow:
       context are returned.
    b. Use list_github_directory to explore the directory structure
       around the referenced files when you need more context.
-5. If the ticket description or comments contain Jenkins URLs, use the
+9. If the ticket description or comments contain Jenkins URLs, use the
    Jenkins tools to gather build context:
    a. Use fetch_jenkins_build to get build status and parameters.
    b. Use search_jenkins_log with error-related patterns (e.g. "error",
@@ -61,11 +91,21 @@ Your workflow:
    c. Use fetch_jenkins_log (with tail_lines) only if you need more
       context around the errors found by search_jenkins_log.
    d. Use fetch_jenkins_test_report to get test pass/fail details.
-6. Analyse the ticket and decompose it into concrete implementation tasks.
-7. Identify the TARGET REPOSITORY URL(s) from the ticket description.
+
+### Phase 5: Synthesise and decompose
+10. Only AFTER completing phases 1-4, analyse the ticket and decompose
+    it into concrete implementation tasks.
+11. Identify the TARGET REPOSITORY URL(s) from the ticket description,
+    linked tickets, and resolved precedent.
+12. Use search_issues with raw JQL ONLY if the above steps left
+    significant gaps in your understanding.
 
 CRITICAL RULES:
-- Do NOT produce your final JSON until you have fetched the ticket data.
+- Do NOT produce your final JSON until you have completed phases 1-3.
+- Do NOT skip phase 2 — the Jira graph provides important context for
+  avoiding duplication and understanding scope.
+- The TARGET TICKET itself (description, code links, CI links) is your
+  PRIMARY source of truth. The Jira graph is supplementary context.
 - Your FINAL response must be a single, valid JSON object — nothing else.
 - Do NOT include markdown fences, commentary, or prose in your final answer.
 
@@ -97,12 +137,29 @@ Your final JSON must follow this schema:
   "tasks": [
     {
       "repo_url": "<normalised GitHub repo URL for this task>",
-      "title": "<task title>",
-      "detail": "<detailed technical description>"
+      "title": "<short task title>",
+      "detail": "<detailed technical description of what to implement>",
+      "target_files": ["<repo-relative file paths identified from GitHub URLs or ticket description>"],
+      "references": [
+        {"type": "jira|github|jenkins", "url": "<source URL>", "relevance": "<one-line why this matters>"}
+      ],
+      "acceptance_criteria": ["<concrete done-condition>", "..."]
     },
     ...
   ]
 }
+
+Field guidance:
+- `target_files`: repo-relative paths (e.g. "src/utils/parser.py") you
+  identified from GitHub blob URLs, code references, or ticket description.
+  These are HINTS for the planner — they do not need to be exhaustive.
+  Use an empty list if no specific files were identified.
+- `references`: Jira tickets, GitHub URLs, or Jenkins build URLs that
+  informed this task. Include only the most relevant (max 5 per task).
+  Use an empty list if no external references apply.
+- `acceptance_criteria`: measurable conditions for considering this task
+  done. Derive them from the ticket description, comments, and linked
+  issues. Use an empty list only if the ticket provides no criteria.
 """
 
 
@@ -214,9 +271,17 @@ class TaskReader:
 
         tasks = llm_output.get("tasks", [])
 
-        # Ensure every task has a repo_url field (default to empty)
+        # Ensure every task has required fields (defaults for optional ones)
         for task in tasks:
             task.setdefault("repo_url", "")
+            task.setdefault("target_files", [])
+            task.setdefault("references", [])
+            task.setdefault("acceptance_criteria", [])
+            if not task.get("detail"):
+                logger.warning(
+                    "Task '%s' has empty detail — Planner will rely on title only",
+                    task.get("title", "(untitled)"),
+                )
 
         if not tasks:
             logger.warning("No tasks produced, using fallback")

@@ -39,14 +39,25 @@ Your workflow:
 1. Use list_directory to understand the top-level repo layout.
 2. Read key files (README, architecture docs, pyproject.toml, etc.)
    to understand project conventions and structure.
-3. Explore directories relevant to the tasks.
-4. Read source files that the tasks reference or affect.
-5. Based on your exploration, validate and refine the task list.
+3. If tasks include `target_files` hints, read those files FIRST —
+   they were identified from the original ticket's GitHub links and
+   are the most likely files to modify. Verify they exist and note
+   any path discrepancies.
+4. Explore directories relevant to the tasks.
+5. Read source files that the tasks reference or affect.
+6. If tasks include `references`, use them to understand provenance
+   and prioritise tasks backed by stronger evidence.
+7. Based on your exploration, validate and refine the task list.
 
 Your job:
 - Check every task for alignment with the actual repository architecture.
 - Identify file-path mismatches, missing modules, naming inconsistencies,
   or assumptions that contradict the real code.
+- Validate `target_files` hints: confirm paths exist, correct them if
+  they moved or were renamed, and add any missing files you discover
+  during exploration.
+- Use `acceptance_criteria` (when provided) to ensure each step
+  addresses the concrete done-conditions from the ticket.
 - Break the work into discrete, self-contained IMPLEMENTATION STEPS.
   Each step will be sent to an implementer LLM in a SEPARATE call.
 - Preserve the intent of each task but rewrite paths, module names, and
@@ -202,13 +213,29 @@ class Planner:
 
         # 5. Call LLM with tools to validate and refine tasks
         tasks_json = json.dumps(task_input.get("tasks", []), indent=2)
-        user = (
-            f"## Tasks from ticket analysis\n```json\n{tasks_json}\n```\n\n"
-            f"## Ticket summary\n{summary}\n\n"
+        interpretation = task_input.get("interpretation", "")
+        description = task_input.get("description", "")
+        # Truncate description to avoid token bloat
+        if len(description) > 2000:
+            description = description[:2000] + "\n... (truncated)"
+
+        sections = [f"## Tasks from ticket analysis\n```json\n{tasks_json}\n```"]
+        sections.append(f"## Ticket summary\n{summary}")
+        if interpretation:
+            sections.append(
+                f"## Ticket interpretation (from upstream analysis)\n"
+                f"{interpretation}"
+            )
+        if description:
+            sections.append(
+                f"## Original ticket description\n{description}"
+            )
+        sections.append(
             "Start by exploring the repository structure with list_directory "
             "and reading key files to understand the codebase. Then validate "
             "and refine the tasks above into concrete implementation steps."
         )
+        user = "\n\n".join(sections)
 
         logger.info("Starting tool-calling session for task validation")
         try:

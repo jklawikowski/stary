@@ -26,6 +26,17 @@ _IGNORED_DIRS = {
     ".eggs",
 }
 
+# Max characters returned by a single Jira tool call.  Prevents
+# large epics or search results from flooding the LLM context window.
+_JIRA_TOOL_MAX_CHARS = 8_000
+
+
+def _truncate(text: str, limit: int = _JIRA_TOOL_MAX_CHARS) -> str:
+    """Truncate *text* to *limit* characters with a notice."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... (truncated — output exceeded limit)"
+
 
 # ---------------------------------------------------------------------------
 # Path validation
@@ -349,16 +360,83 @@ def make_shell_tools(repo_path: str) -> list[ToolDefinition]:
 def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
     """Tools for fetching Jira ticket information."""
 
+    # Discover the instance-specific epic-link custom field once.
+    _epic_field = getattr(jira_adapter, "get_epic_link_field", lambda: "")()
+
     def fetch_ticket(issue_key: str) -> str:
         try:
-            issue = jira_adapter.get_issue(
-                issue_key, fields=["summary", "description", "status", "issuetype"],
-            )
-            return (
-                f"Key: {issue.key}\n"
-                f"Summary: {issue.summary}\n"
-                f"Description:\n{issue.description}"
-            )
+            request_fields = [
+                "summary", "description", "status", "issuetype",
+                "priority", "labels", "components", "fixVersions",
+                "issuelinks", "subtasks", "parent",
+            ]
+            if _epic_field:
+                request_fields.append(_epic_field)
+
+            issue = jira_adapter.get_issue(issue_key, fields=request_fields)
+            f = issue.fields or {}
+
+            status = (f.get("status") or {}).get("name", "")
+            issuetype = (f.get("issuetype") or {}).get("name", "")
+            priority = (f.get("priority") or {}).get("name", "")
+            labels = f.get("labels") or []
+            components = [c.get("name", "") for c in (f.get("components") or [])]
+            fix_versions = [v.get("name", "") for v in (f.get("fixVersions") or [])]
+
+            # Epic / parent detection
+            parent = f.get("parent") or {}
+            parent_key = parent.get("key", "")
+            epic_link = (f.get(_epic_field) or "") if _epic_field else ""
+            epic_display = epic_link or parent_key or ""
+
+            # Linked issues summary
+            links_raw = f.get("issuelinks") or []
+            link_lines: list[str] = []
+            for link in links_raw:
+                lt = (link.get("type") or {}).get("name", "")
+                for direction in ("inwardIssue", "outwardIssue"):
+                    target = link.get(direction)
+                    if target:
+                        t_fields = target.get("fields") or {}
+                        t_status = (t_fields.get("status") or {}).get("name", "")
+                        link_lines.append(
+                            f"  - [{lt}] {target.get('key', '')} "
+                            f"({t_status}): {t_fields.get('summary', '')}"
+                        )
+
+            # Subtasks summary
+            subtasks_raw = f.get("subtasks") or []
+            subtask_lines: list[str] = []
+            for st in subtasks_raw:
+                st_f = st.get("fields") or {}
+                st_status = (st_f.get("status") or {}).get("name", "")
+                subtask_lines.append(
+                    f"  - {st.get('key', '')} ({st_status}): "
+                    f"{st_f.get('summary', '')}"
+                )
+
+            parts = [
+                f"Key: {issue.key}",
+                f"Type: {issuetype}",
+                f"Status: {status}",
+                f"Priority: {priority}",
+                f"Summary: {issue.summary}",
+            ]
+            if epic_display:
+                parts.append(f"Epic/Parent: {epic_display}")
+            if labels:
+                parts.append(f"Labels: {', '.join(labels)}")
+            if components:
+                parts.append(f"Components: {', '.join(components)}")
+            if fix_versions:
+                parts.append(f"Fix Versions: {', '.join(fix_versions)}")
+            if link_lines:
+                parts.append("Linked Issues:\n" + "\n".join(link_lines))
+            if subtask_lines:
+                parts.append("Subtasks:\n" + "\n".join(subtask_lines))
+            parts.append(f"Description:\n{issue.description}")
+
+            return _truncate("\n".join(parts))
         except Exception as exc:
             logger.error("fetch_ticket(%s) failed: %s", issue_key, exc)
             return f"Error fetching ticket {issue_key}: {exc}"
@@ -370,12 +448,71 @@ def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
                 return "No comments on this ticket."
             parts: list[str] = []
             for c in comments[:20]:
-                author = c.get("author", {}).get("displayName", "Unknown")
-                body = c.get("body", "")
+                author = getattr(c, "author", "") or "Unknown"
+                body = getattr(c, "body", "") or ""
                 parts.append(f"[{author}]: {body[:500]}")
-            return "\n---\n".join(parts)
+            return _truncate("\n---\n".join(parts))
         except Exception as exc:
             return f"Error fetching comments for {issue_key}: {exc}"
+
+    def get_linked_issues(issue_key: str) -> str:
+        try:
+            links = jira_adapter.get_linked_issues(issue_key)
+            if not links:
+                return "No linked issues."
+            parts: list[str] = []
+            for lnk in links:
+                parts.append(
+                    f"[{lnk['link_type']} / {lnk['direction']}] "
+                    f"{lnk['key']} ({lnk['status']}): {lnk['summary']}"
+                )
+            return _truncate("\n".join(parts))
+        except Exception as exc:
+            return f"Error fetching linked issues for {issue_key}: {exc}"
+
+    def get_subtasks(issue_key: str) -> str:
+        try:
+            subtasks = jira_adapter.get_subtasks(issue_key)
+            if not subtasks:
+                return "No subtasks."
+            parts: list[str] = []
+            for st in subtasks:
+                parts.append(f"{st['key']} ({st['status']}): {st['summary']}")
+            return _truncate("\n".join(parts))
+        except Exception as exc:
+            return f"Error fetching subtasks for {issue_key}: {exc}"
+
+    def get_epic_children(epic_key: str) -> str:
+        try:
+            children = jira_adapter.get_epic_children(epic_key)
+            if not children:
+                return "No children found for this epic."
+            parts: list[str] = []
+            for ch in children:
+                ch_fields = ch.fields or {}
+                status = (ch_fields.get("status") or {}).get("name", "")
+                itype = (ch_fields.get("issuetype") or {}).get("name", "")
+                assignee = (ch_fields.get("assignee") or {}).get("displayName", "Unassigned")
+                parts.append(
+                    f"{ch.key} [{itype}] ({status}, {assignee}): {ch.summary}"
+                )
+            return _truncate("\n".join(parts))
+        except Exception as exc:
+            return f"Error fetching epic children for {epic_key}: {exc}"
+
+    def find_similar_resolved(issue_key: str) -> str:
+        try:
+            results = jira_adapter.find_similar_resolved(issue_key)
+            if not results:
+                return "No similar resolved tickets found."
+            parts: list[str] = []
+            for r in results:
+                r_fields = r.fields or {}
+                resolution = (r_fields.get("resolution") or {}).get("name", "")
+                parts.append(f"{r.key} (resolved: {resolution}): {r.summary}")
+            return _truncate("\n".join(parts))
+        except Exception as exc:
+            return f"Error finding similar resolved tickets: {exc}"
 
     def search_issues(jql: str) -> str:
         try:
@@ -385,14 +522,18 @@ def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
             parts: list[str] = []
             for issue in results:
                 parts.append(f"{issue.key}: {issue.summary}")
-            return "\n".join(parts)
+            return _truncate("\n".join(parts))
         except Exception as exc:
             return f"Error searching Jira: {exc}"
 
     return [
         ToolDefinition(
             name="fetch_ticket",
-            description="Fetch a Jira ticket by its issue key (e.g. PROJ-123). Returns summary, description, and metadata.",
+            description=(
+                "Fetch a Jira ticket by its issue key (e.g. PROJ-123). "
+                "Returns summary, description, status, priority, labels, "
+                "components, linked issues, subtasks, and epic/parent info."
+            ),
             parameters=[
                 ToolParam("issue_key", "string", "Jira issue key, e.g. PROJ-123"),
             ],
@@ -407,8 +548,55 @@ def make_jira_tools(jira_adapter) -> list[ToolDefinition]:
             handler=get_comments,
         ),
         ToolDefinition(
+            name="get_linked_issues",
+            description=(
+                "Get all issues linked to a ticket (blocks, is-blocked-by, "
+                "relates-to, duplicates, etc.) with their status and summary."
+            ),
+            parameters=[
+                ToolParam("issue_key", "string", "Jira issue key"),
+            ],
+            handler=get_linked_issues,
+        ),
+        ToolDefinition(
+            name="get_subtasks",
+            description="Get all subtasks of a Jira issue with their status.",
+            parameters=[
+                ToolParam("issue_key", "string", "Jira issue key"),
+            ],
+            handler=get_subtasks,
+        ),
+        ToolDefinition(
+            name="get_epic_children",
+            description=(
+                "Get all stories/tasks that belong to an epic. Returns each "
+                "child's key, type, status, assignee, and summary. Use this "
+                "to understand the scope of the epic the current ticket "
+                "belongs to."
+            ),
+            parameters=[
+                ToolParam("epic_key", "string", "Epic issue key, e.g. PROJ-100"),
+            ],
+            handler=get_epic_children,
+        ),
+        ToolDefinition(
+            name="find_similar_resolved",
+            description=(
+                "Find recently resolved tickets in the same project and "
+                "components as the given ticket. Useful for finding "
+                "implementation precedent and patterns from past work."
+            ),
+            parameters=[
+                ToolParam("issue_key", "string", "Jira issue key to find similar resolved tickets for"),
+            ],
+            handler=find_similar_resolved,
+        ),
+        ToolDefinition(
             name="search_issues",
-            description="Search Jira issues with a JQL query.",
+            description=(
+                "Search Jira issues with a raw JQL query. Use this as a "
+                "fallback when the other Jira tools don't cover your needs."
+            ),
             parameters=[
                 ToolParam("jql", "string", "JQL query string"),
             ],
